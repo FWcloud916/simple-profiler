@@ -309,17 +309,19 @@
     average.textContent = `avg ${formatValue(series.average_value, series.unit)}`;
     stats.append(max, average);
     head.append(title, stats);
-    card.append(head, renderSvgChart(series));
+    const processSeries = processSeriesForMetric(series.metric_name);
+    card.append(head, renderSvgChart(series, processSeries));
     const axis = element("div", "chart-axis");
     axis.append(
       textNode(formatShortTime(state.snapshot.range.from_ms)),
       textNode(formatShortTime(state.snapshot.range.to_ms)),
     );
     card.append(axis);
+    if (processSeries.length) card.append(renderProcessLegend(series.metric_name, processSeries));
     return card;
   }
 
-  function renderSvgChart(series) {
+  function renderSvgChart(series, processSeries) {
     const frame = element("div", "chart-frame");
     const svg = svgElement("svg", { viewBox: "0 0 700 190", role: "img", "aria-label": `${metricLabel(series.metric_name)} trend` });
     enableChartNavigation(frame, svg, metricLabel(series.metric_name));
@@ -328,25 +330,134 @@
       frame.append(svg);
       return frame;
     }
+    const processPeaks = processSeries.flatMap((process) => process.points.map((point) => processPointValue(point, series.metric_name, "peak"))).filter(Number.isFinite);
     const lower = series.unit === "percent" ? 0 : Math.min(0, series.min_value);
-    const upper = series.unit === "percent" ? Math.max(100, series.max_value) : Math.max(series.max_value, lower + 1);
+    const upper = series.unit === "percent"
+      ? Math.max(100, series.max_value, ...processPeaks)
+      : Math.max(series.max_value, lower + 1);
     const duration = Math.max(1, state.snapshot.range.to_ms - state.snapshot.range.from_ms);
-    const scale = (point, field) => {
-      const x = ((point.timestamp_ms - state.snapshot.range.from_ms) / duration) * 700;
-      const y = 180 - ((point[field] - lower) / Math.max(Number.EPSILON, upper - lower)) * 160;
+    const scale = (timestamp, value) => {
+      const x = ((timestamp - state.snapshot.range.from_ms) / duration) * 700;
+      const y = 180 - ((value - lower) / Math.max(Number.EPSILON, upper - lower)) * 160;
       return [clamp(x, 0, 700), clamp(y, 10, 180)];
     };
     splitSegments(series.points, state.snapshot.bucket_span_ms).forEach((points) => {
       if (!points.length) return;
-      const upperPoints = points.map((point) => scale(point, "max_value"));
-      const lowerPoints = [...points].reverse().map((point) => scale(point, "min_value"));
+      const upperPoints = points.map((point) => scale(point.timestamp_ms, point.max_value));
+      const lowerPoints = [...points].reverse().map((point) => scale(point.timestamp_ms, point.min_value));
       const band = [...upperPoints, ...lowerPoints].map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
       svg.append(svgElement("polygon", { points: band, class: "chart-band" }));
-      const line = points.map((point) => scale(point, "average_value")).map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+      const line = points.map((point) => scale(point.timestamp_ms, point.average_value)).map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
       svg.append(svgElement("polyline", { points: line, class: "chart-line" }));
     });
+    processSeries.forEach((process) => {
+      const rank = processRank(process, series.metric_name);
+      splitSegments(process.points, state.snapshot.process_bucket_span_ms).forEach((points) => {
+        const line = points
+          .map((point) => scale(point.timestamp_ms, processPointValue(point, series.metric_name, "average")))
+          .map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`)
+          .join(" ");
+        svg.append(svgElement("polyline", { points: line, class: `process-line process-rank-${rank}` }));
+      });
+    });
+    enableChartTooltip(frame, svg, series, processSeries, scale);
     frame.append(svg);
     return frame;
+  }
+
+  function renderProcessLegend(metricName, processSeries) {
+    const legend = element("div", "chart-legend");
+    legend.setAttribute("aria-label", `${metricLabel(metricName)} chart legend`);
+    const system = element("span", "legend-item system-series");
+    system.append(element("i", "legend-line"), textNode("System"));
+    legend.append(system);
+    processSeries.forEach((process) => {
+      const rank = processRank(process, metricName);
+      const item = element("span", `legend-item process-rank-${rank}`);
+      item.title = `${process.name} · PID ${process.pid}`;
+      item.append(element("i", "legend-line"), textNode(`#${rank} ${process.name}`));
+      legend.append(item);
+    });
+    return legend;
+  }
+
+  function enableChartTooltip(frame, svg, series, processSeries, scale) {
+    const guide = svgElement("line", { x1: 0, y1: 10, x2: 0, y2: 180, class: "chart-hover-guide" });
+    guide.setAttribute("visibility", "hidden");
+    const markers = [svgElement("circle", { r: 4, class: "chart-hover-marker system-series" })];
+    processSeries.forEach((process) => {
+      const rank = processRank(process, series.metric_name);
+      markers.push(svgElement("circle", { r: 3.5, class: `chart-hover-marker process-rank-${rank}` }));
+    });
+    markers.forEach((marker) => marker.setAttribute("visibility", "hidden"));
+    svg.append(guide, ...markers);
+    const tooltip = element("div", "chart-tooltip");
+    tooltip.setAttribute("role", "status");
+    tooltip.hidden = true;
+    frame.append(tooltip);
+
+    const showAt = (requestedTimestamp) => {
+      const point = nearestPoint(series.points, requestedTimestamp);
+      if (!point) return;
+      const [x, y] = scale(point.timestamp_ms, point.average_value);
+      guide.setAttribute("x1", x);
+      guide.setAttribute("x2", x);
+      guide.setAttribute("visibility", "visible");
+      setMarker(markers[0], x, y);
+      const rows = [tooltipRow("System", formatValue(point.average_value, series.unit), `min ${formatValue(point.min_value, series.unit)} · max ${formatValue(point.max_value, series.unit)}`, "system-series")];
+      processSeries.forEach((process, index) => {
+        const processPoint = nearestPoint(process.points, point.timestamp_ms, state.snapshot.process_bucket_span_ms * 1.6);
+        const marker = markers[index + 1];
+        if (!processPoint) {
+          marker.setAttribute("visibility", "hidden");
+          return;
+        }
+        const average = processPointValue(processPoint, series.metric_name, "average");
+        const [, processY] = scale(processPoint.timestamp_ms, average);
+        setMarker(marker, x, processY);
+        const rank = processRank(process, series.metric_name);
+        const value = series.metric_name === "memory.usage"
+          ? `${formatValue(average, "percent")} · ${formatBytes(processPoint.average_memory_bytes)}`
+          : formatValue(average, "percent");
+        rows.push(tooltipRow(`#${rank} ${process.name}`, value, `PID ${process.pid}`, `process-rank-${rank}`));
+      });
+      tooltip.replaceChildren(elementWithText("strong", "tooltip-time", formatTime(point.timestamp_ms)), ...rows);
+      tooltip.hidden = false;
+      const position = ((point.timestamp_ms - state.snapshot.range.from_ms) / Math.max(1, state.snapshot.range.to_ms - state.snapshot.range.from_ms)) * 100;
+      tooltip.style.left = `${clamp(position, 0, 100)}%`;
+      tooltip.classList.toggle("align-right", position > 58);
+    };
+    const hide = () => {
+      tooltip.hidden = true;
+      guide.setAttribute("visibility", "hidden");
+      markers.forEach((marker) => marker.setAttribute("visibility", "hidden"));
+    };
+    frame.addEventListener("pointermove", (event) => {
+      if (frame.classList.contains("dragging") || event.pointerType === "touch") return;
+      const bounds = frame.getBoundingClientRect();
+      if (bounds.width <= 0) return;
+      const position = clamp((event.clientX - bounds.left) / bounds.width, 0, 1);
+      showAt(state.snapshot.range.from_ms + position * (state.snapshot.range.to_ms - state.snapshot.range.from_ms));
+    });
+    frame.addEventListener("pointerleave", hide);
+    frame.addEventListener("focus", () => showAt(series.points.at(-1)?.timestamp_ms));
+    frame.addEventListener("blur", hide);
+  }
+
+  function tooltipRow(label, value, detail, className) {
+    const row = element("div", `tooltip-row ${className}`);
+    const name = element("span", "tooltip-name");
+    name.append(element("i", "tooltip-dot"), textNode(label));
+    const measurement = element("span", "tooltip-value");
+    measurement.append(elementWithText("strong", "", value), elementWithText("small", "", detail));
+    row.append(name, measurement);
+    return row;
+  }
+
+  function setMarker(marker, x, y) {
+    marker.setAttribute("cx", x);
+    marker.setAttribute("cy", y);
+    marker.setAttribute("visibility", "visible");
   }
 
   function enableChartNavigation(frame, svg, label) {
@@ -358,6 +469,9 @@
     frame.setAttribute("aria-label", `${label} time chart. Drag horizontally or use left and right arrow keys to move through history.`);
     frame.addEventListener("pointerdown", (event) => {
       if (event.button !== 0 || !timelineBounds()) return;
+      const tooltip = frame.querySelector(".chart-tooltip");
+      if (tooltip) tooltip.hidden = true;
+      frame.querySelectorAll(".chart-hover-guide, .chart-hover-marker").forEach((node) => node.setAttribute("visibility", "hidden"));
       pointerId = event.pointerId;
       startX = event.clientX;
       deltaX = 0;
@@ -588,6 +702,20 @@
 
   function findSeries(metricName) { return state.snapshot.series.find((series) => series.metric_name === metricName); }
   function findAllSeries(metricName) { return state.snapshot.series.filter((series) => series.metric_name === metricName); }
+  function processSeriesForMetric(metricName) {
+    const rankField = metricName === "cpu.total.usage" ? "cpu_rank" : metricName === "memory.usage" && state.snapshot.system_memory_bytes ? "memory_rank" : null;
+    if (!rankField) return [];
+    return state.snapshot.process_series
+      .filter((series) => series[rankField] != null && series.points.length)
+      .sort((left, right) => left[rankField] - right[rankField])
+      .slice(0, 3);
+  }
+  function processRank(series, metricName) { return metricName === "cpu.total.usage" ? series.cpu_rank : series.memory_rank; }
+  function processPointValue(point, metricName, kind) {
+    if (metricName === "cpu.total.usage") return point[`${kind}_cpu_percent`];
+    const bytes = point[`${kind}_memory_bytes`];
+    return state.snapshot.system_memory_bytes ? (bytes / state.snapshot.system_memory_bytes) * 100 : Number.NaN;
+  }
   function findCapability(name) { return state.status.capabilities.find((capability) => capability.capability === name); }
   function capabilityLabel(value) { return ({ available: "Available", degraded: "Degraded", unavailable: "Unavailable" })[value] || value; }
   function capabilitySummary(capabilities) {
@@ -611,6 +739,19 @@
     });
     if (current.length) segments.push(current);
     return segments;
+  }
+  function nearestPoint(points, timestamp, maximumDistance = Number.POSITIVE_INFINITY) {
+    if (!points.length || !Number.isFinite(timestamp)) return null;
+    let low = 0;
+    let high = points.length - 1;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (points[middle].timestamp_ms < timestamp) low = middle + 1;
+      else high = middle;
+    }
+    const candidates = [points[low], points[low - 1]].filter(Boolean);
+    const closest = candidates.reduce((best, point) => !best || Math.abs(point.timestamp_ms - timestamp) < Math.abs(best.timestamp_ms - timestamp) ? point : best, null);
+    return closest && Math.abs(closest.timestamp_ms - timestamp) <= maximumDistance ? closest : null;
   }
   function metricOrder(name) { const index = ["cpu.total.usage", "memory.usage", "gpu.device.usage", "gpu.renderer.usage", "gpu.tiler.usage", "gpu.memory.used", "gpu.memory.allocated", "disk.space.usage", "disk.io.read.rate", "disk.io.write.rate", "network.receive.rate", "network.transmit.rate"].indexOf(name); return index < 0 ? 999 : index; }
   function metricLabel(name) { return ({ "cpu.total.usage": "CPU usage", "memory.usage": "Memory usage", "gpu.device.usage": "GPU usage", "gpu.renderer.usage": "GPU renderer usage", "gpu.tiler.usage": "GPU tiler usage", "gpu.memory.used": "GPU memory in use", "gpu.memory.allocated": "GPU allocated memory", "disk.space.usage": "Disk space usage", "disk.io.read.rate": "Disk read rate", "disk.io.write.rate": "Disk write rate", "network.receive.rate": "Network receive rate", "network.transmit.rate": "Network transmit rate" })[name] || name; }

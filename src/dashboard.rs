@@ -334,4 +334,15 @@ mod tests {
         assert!(APP_JS.contains("window.setTimeout(refresh, 180)"));
         assert!(APP_CSS.contains("touch-action: pan-y"));
     }
+
+    #[test]
+    fn embedded_dashboard_exposes_hover_values_and_ranked_process_lines() {
+        assert!(APP_JS.contains("enableChartTooltip"));
+        assert!(APP_JS.contains("min ${formatValue(point.min_value"));
+        assert!(APP_JS.contains("processSeriesForMetric"));
+        assert!(APP_JS.contains("process-rank-${rank}"));
+        assert!(APP_CSS.contains(".chart-tooltip"));
+        assert!(APP_CSS.contains(".process-line.process-rank-2"));
+        assert!(APP_CSS.contains(".process-line.process-rank-3"));
+    }
 }

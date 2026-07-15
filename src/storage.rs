@@ -1718,6 +1718,97 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_returns_bounded_top_process_chart_series() {
+        let directory = tempdir().expect("temp dir");
+        let path = directory.path().join("dashboard-processes.sqlite3");
+        let mut storage = Storage::open(&path).expect("open storage");
+        let anomaly = AnomalyConfig::default();
+        let process = ProcessConfig::default();
+        let mut engine = storage.load_anomaly_engine(&anomaly).expect("engine");
+        for seconds in [10, 25] {
+            storage
+                .insert_batch_with_anomalies(
+                    &CollectionBatch {
+                        metrics: vec![
+                            cpu_metric(seconds, 40.0),
+                            Metric::new(
+                                at(seconds * 1_000),
+                                "system",
+                                "memory.total",
+                                16.0 * 1024.0 * 1024.0 * 1024.0,
+                                "bytes",
+                            ),
+                            Metric::new(
+                                at(seconds * 1_000),
+                                "system",
+                                "memory.usage",
+                                50.0,
+                                "percent",
+                            ),
+                        ],
+                        processes: vec![
+                            process_sample(
+                                seconds,
+                                10,
+                                "cpu-heavy",
+                                80.0,
+                                512 * 1024 * 1024,
+                                Some(1),
+                                Some(2),
+                            ),
+                            process_sample(
+                                seconds,
+                                20,
+                                "memory-heavy",
+                                20.0,
+                                2 * 1024 * 1024 * 1024,
+                                Some(2),
+                                Some(1),
+                            ),
+                        ],
+                        capabilities: Vec::new(),
+                    },
+                    &mut engine,
+                    &anomaly,
+                    &process,
+                )
+                .expect("sample");
+        }
+        drop(storage);
+
+        let read_only = Storage::open_read_only(&path).expect("read-only storage");
+        let snapshot = read_only
+            .dashboard_snapshot(ReportRange::new(0, 60_000).expect("range"))
+            .expect("dashboard snapshot");
+
+        assert_eq!(snapshot.system_memory_bytes, Some(16 * 1024 * 1024 * 1024));
+        assert_eq!(snapshot.process_bucket_span_ms, 15_000);
+        assert_eq!(snapshot.process_series.len(), 2);
+        assert!(
+            snapshot
+                .process_series
+                .iter()
+                .all(|series| series.points.len() == 2)
+        );
+        assert_eq!(
+            snapshot
+                .process_series
+                .iter()
+                .find(|series| series.name == "cpu-heavy")
+                .and_then(|series| series.cpu_rank),
+            Some(1)
+        );
+        assert_eq!(
+            snapshot
+                .process_series
+                .iter()
+                .find(|series| series.name == "memory-heavy")
+                .and_then(|series| series.memory_rank),
+            Some(1)
+        );
+    }
+
+    #[test]
     fn dashboard_does_not_migrate_an_old_database() {
         let directory = tempdir().expect("temp dir");
         let path = directory.path().join("old.sqlite3");

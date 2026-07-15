@@ -113,6 +113,25 @@ pub struct ReportProcessSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DashboardProcessPoint {
+    pub timestamp_ms: i64,
+    pub average_cpu_percent: f64,
+    pub peak_cpu_percent: f64,
+    pub average_memory_bytes: f64,
+    pub peak_memory_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DashboardProcessSeries {
+    pub pid: u32,
+    pub process_start_time_seconds: u64,
+    pub name: String,
+    pub cpu_rank: Option<u8>,
+    pub memory_rank: Option<u8>,
+    pub points: Vec<DashboardProcessPoint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ReportData {
     pub generated_at_ms: i64,
     pub range: ReportRange,
@@ -143,6 +162,9 @@ pub struct DashboardSnapshot {
     pub events: Vec<EventSummary>,
     pub events_truncated: bool,
     pub processes: Vec<ReportProcessSummary>,
+    pub process_bucket_span_ms: i64,
+    pub system_memory_bytes: Option<u64>,
+    pub process_series: Vec<DashboardProcessSeries>,
 }
 
 pub fn resolve_range(

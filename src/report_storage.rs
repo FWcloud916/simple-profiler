@@ -2,18 +2,21 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{
     anomaly_storage, capability_storage,
     report::{
-        DashboardSnapshot, MAX_CHART_POINTS, ReportData, ReportPoint, ReportProcessSummary,
-        ReportRange, ReportResolution, ReportSeries,
+        DashboardProcessPoint, DashboardProcessSeries, DashboardSnapshot, MAX_CHART_POINTS,
+        ReportData, ReportPoint, ReportProcessSummary, ReportRange, ReportResolution, ReportSeries,
     },
 };
 
 const EVENT_LIMIT: usize = 200;
 const PROCESS_LIMIT_PER_DIMENSION: usize = 20;
+const PROCESS_CHART_LIMIT_PER_DIMENSION: usize = 3;
+const MAX_PROCESS_CHART_POINTS: i64 = 360;
+const MIN_PROCESS_BUCKET_MS: i64 = 15_000;
 const REPORT_METRICS: &str = r#"
     'cpu.total.usage',
     'memory.usage',
@@ -35,6 +38,15 @@ struct SeriesKey {
     resource: String,
     metric_name: String,
     unit: String,
+}
+
+#[derive(Debug)]
+struct ProcessSeriesSelection {
+    pid: u32,
+    process_start_time_seconds: u64,
+    name: String,
+    cpu_rank: Option<u8>,
+    memory_rank: Option<u8>,
 }
 
 pub(crate) fn load_report(connection: &Connection, range: ReportRange) -> Result<ReportData> {
@@ -91,6 +103,8 @@ pub(crate) fn load_dashboard_snapshot(
     let (events, events_truncated) =
         anomaly_storage::list_events_in_range(connection, range.from_ms, range.to_ms, EVENT_LIMIT)?;
     let processes = query_processes(connection, range)?;
+    let (process_bucket_span_ms, system_memory_bytes, process_series) =
+        query_process_series(connection, range)?;
     let (process_oldest_ms, process_newest_ms) = process_coverage(connection, range)?;
     Ok(DashboardSnapshot {
         generated_at_ms: Utc::now().timestamp_millis(),
@@ -105,6 +119,9 @@ pub(crate) fn load_dashboard_snapshot(
         events,
         events_truncated,
         processes,
+        process_bucket_span_ms,
+        system_memory_bytes,
+        process_series,
     })
 }
 
@@ -368,6 +385,129 @@ fn query_processes(
     Ok(values)
 }
 
+fn query_process_series(
+    connection: &Connection,
+    range: ReportRange,
+) -> Result<(i64, Option<u64>, Vec<DashboardProcessSeries>)> {
+    let process_bucket_span_ms = process_chart_bucket_span_ms(range);
+    let mut selected: BTreeMap<(u32, u64), ProcessSeriesSelection> = BTreeMap::new();
+    for (order_column, cpu_dimension) in [("peak_cpu", true), ("peak_memory", false)] {
+        let sql = format!(
+            "SELECT pid, process_start_time_seconds, MAX(name),
+                    MAX(cpu_usage_percent) AS peak_cpu,
+                    MAX(memory_bytes) AS peak_memory
+             FROM process_samples
+             WHERE collected_at_ms >= ?1 AND collected_at_ms < ?2
+             GROUP BY pid, process_start_time_seconds
+             ORDER BY {order_column} DESC, pid
+             LIMIT ?3"
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map(
+            params![
+                range.from_ms,
+                range.to_ms,
+                i64::try_from(PROCESS_CHART_LIMIT_PER_DIMENSION).unwrap_or(i64::MAX)
+            ],
+            |row| {
+                let pid: i64 = row.get(0)?;
+                let start: i64 = row.get(1)?;
+                Ok((
+                    u32::try_from(pid).unwrap_or(0),
+                    u64::try_from(start).unwrap_or(0),
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+        for (index, row) in rows.enumerate() {
+            let (pid, process_start_time_seconds, name) = row?;
+            let selection = selected
+                .entry((pid, process_start_time_seconds))
+                .or_insert_with(|| ProcessSeriesSelection {
+                    pid,
+                    process_start_time_seconds,
+                    name,
+                    cpu_rank: None,
+                    memory_rank: None,
+                });
+            let rank = Some(u8::try_from(index + 1).unwrap_or(u8::MAX));
+            if cpu_dimension {
+                selection.cpu_rank = rank;
+            } else {
+                selection.memory_rank = rank;
+            }
+        }
+    }
+
+    let mut process_series = Vec::with_capacity(selected.len());
+    for selection in selected.into_values() {
+        let mut statement = connection.prepare(
+            "SELECT ((collected_at_ms - ?1) / ?5) * ?5 + ?1 AS chart_bucket,
+                    AVG(cpu_usage_percent), MAX(cpu_usage_percent),
+                    AVG(memory_bytes), MAX(memory_bytes)
+             FROM process_samples
+             WHERE collected_at_ms >= ?1 AND collected_at_ms < ?2
+               AND pid = ?3 AND process_start_time_seconds = ?4
+             GROUP BY chart_bucket
+             ORDER BY chart_bucket",
+        )?;
+        let rows = statement.query_map(
+            params![
+                range.from_ms,
+                range.to_ms,
+                i64::from(selection.pid),
+                i64::try_from(selection.process_start_time_seconds).unwrap_or(i64::MAX),
+                process_bucket_span_ms,
+            ],
+            |row| {
+                let peak_memory: i64 = row.get(4)?;
+                Ok(DashboardProcessPoint {
+                    timestamp_ms: row.get(0)?,
+                    average_cpu_percent: row.get(1)?,
+                    peak_cpu_percent: row.get(2)?,
+                    average_memory_bytes: row.get(3)?,
+                    peak_memory_bytes: u64::try_from(peak_memory).unwrap_or(0),
+                })
+            },
+        )?;
+        process_series.push(DashboardProcessSeries {
+            pid: selection.pid,
+            process_start_time_seconds: selection.process_start_time_seconds,
+            name: selection.name,
+            cpu_rank: selection.cpu_rank,
+            memory_rank: selection.memory_rank,
+            points: rows.collect::<rusqlite::Result<Vec<_>>>()?,
+        });
+    }
+
+    let memory_total = connection
+        .query_row(
+            "SELECT value FROM metric_samples
+             WHERE collected_at_ms >= ?1 AND collected_at_ms < ?2
+               AND metric_name = 'memory.total'
+             ORDER BY collected_at_ms DESC LIMIT 1",
+            params![range.from_ms, range.to_ms],
+            |row| row.get::<_, f64>(0),
+        )
+        .optional()?
+        .and_then(float_to_u64);
+
+    Ok((process_bucket_span_ms, memory_total, process_series))
+}
+
+fn process_chart_bucket_span_ms(range: ReportRange) -> i64 {
+    let needed = range
+        .duration_ms()
+        .saturating_add(MAX_PROCESS_CHART_POINTS - 1)
+        / MAX_PROCESS_CHART_POINTS;
+    let rounded = needed.saturating_add(999) / 1_000 * 1_000;
+    rounded.max(MIN_PROCESS_BUCKET_MS)
+}
+
+fn float_to_u64(value: f64) -> Option<u64> {
+    (value.is_finite() && value >= 0.0 && value <= u64::MAX as f64).then(|| value.round() as u64)
+}
+
 fn process_coverage(
     connection: &Connection,
     range: ReportRange,
@@ -391,5 +531,14 @@ mod tests {
 
         assert!(range.duration_ms() / bucket <= MAX_CHART_POINTS);
         assert_eq!(bucket % (15 * 60 * 1_000), 0);
+    }
+
+    #[test]
+    fn process_chart_buckets_stay_bounded() {
+        let range = ReportRange::new(0, 24 * 60 * 60 * 1_000).expect("range");
+        let bucket = process_chart_bucket_span_ms(range);
+
+        assert!(range.duration_ms() / bucket <= MAX_PROCESS_CHART_POINTS);
+        assert!(bucket >= MIN_PROCESS_BUCKET_MS);
     }
 }
