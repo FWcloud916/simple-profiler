@@ -1,6 +1,6 @@
 # Simple Profiler — Progress
 
-> **Last session:** 2026-07-15 · commit `2292643` · tests: passing (44)
+> **Last session:** 2026-07-15 · commit `dd308fb` · tests: passing (44)
 
 ## Now (WIP = 1)
 
@@ -70,6 +70,10 @@ local HTML diagnostic reports are the next product feature.
   environments, or working directories; executable paths remain opt-in.
 - The process-attribution phase passes 44 tests, rustfmt, strict Clippy, release build, v3-to-v4
   migration, PID-reuse/retention/cardinality/privacy boundaries, and live CPU/memory CLI smoke checks.
+- The installed macOS LaunchAgent now runs the schema-v4 process-attribution release; live status
+  confirms system and process timestamps continue advancing after restart.
+- LaunchAgent upgrade now waits for asynchronous `bootout` removal before `bootstrap`, preventing
+  the observed launchd `Operation already in progress` race on consecutive upgrades.
 
 ## Blockers
 
@@ -80,11 +84,13 @@ None.
 1. Define the local HTML report request, time-range selection, and output contract.
 2. Define report queries that choose raw, one-minute, or 15-minute data by requested range.
 3. Design report sections that combine resource summaries, anomaly timelines, and evidence.
-4. With explicit approval, build a release binary, upgrade the installed LaunchAgent, and verify
-   that schema v4 migration and process/event collection work against the live service database.
+4. Inspect the first naturally occurring CPU or memory anomaly to validate its preserved process
+   evidence against the report requirements.
 
 ## Decision log
 
+- 2026-07-15 — Wait up to five seconds for launchd to report an unloaded agent before bootstrapping
+  its replacement; `bootout` completion is asynchronous even after launchctl exits successfully.
 - 2026-07-15 — Sample the union of top 10 CPU and top 10 resident-memory processes every 15
   seconds; keep raw snapshots for 24 hours and identify process instances with PID plus start time.
 - 2026-07-15 — Copy top five fresh process rows into CPU/memory event checkpoints with a 500-row
