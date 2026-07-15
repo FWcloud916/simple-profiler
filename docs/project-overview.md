@@ -15,8 +15,8 @@
 ### 1.1 Core Responsibilities
 
 Simple Profiler continuously samples host resource metrics, persists them locally, and will
-eventually turn selected time ranges into diagnostic reports. The implemented MVP collects CPU
-and memory measurements and writes them to SQLite. Disk, network, GPU, anomaly detection,
+eventually turn selected time ranges into diagnostic reports. The implemented MVP collects CPU,
+memory, disk, and network measurements and writes them to SQLite. GPU, anomaly detection,
 retention, reports, and a local dashboard are planned.
 
 ### 1.2 Relationship with Other Systems
@@ -27,7 +27,7 @@ vendor-specific adapters, but their exact APIs are not yet designed.
 
 ### 1.3 Deprecated / Retired or Not-Yet-Enabled Features
 
-- **Not yet enabled:** disk, network, GPU, process, temperature, and power collectors.
+- **Not yet enabled:** GPU, process, temperature, and power collectors.
 - **Not yet enabled:** rollups, retention, anomaly events, reports, and the dashboard.
 - No deprecated features exist in the initial version.
 
@@ -37,7 +37,7 @@ vendor-specific adapters, but their exact APIs are not yet designed.
 |---|---|---|
 | Language | Rust 1.92.0, edition 2024 | Selected by the user for predictable resource use and low-level system access; pinned as the MSRV in [`../clippy.toml`](../clippy.toml) |
 | Async runtime | Tokio 1.52.3 | Timed collection, bounded channels, shutdown signals, and the blocking storage task |
-| Host metrics | sysinfo 0.38.4 | Cross-platform CPU and memory access; this is the newest locked release compatible with Rust 1.92.0 |
+| Host metrics | sysinfo 0.38.4 | Cross-platform CPU, memory, disk, and network access; this is the newest locked release compatible with Rust 1.92.0 |
 | Local datastore | SQLite through rusqlite 0.39.0 | A local embedded store fits a single-host profiler; rusqlite supports an explicit single-writer design |
 | CLI | Clap 4.6.1 | Defines the implemented `run` and `status` commands |
 | Configuration | TOML through toml 1.1.3 and Serde | Human-readable local configuration with typed validation |
@@ -54,20 +54,27 @@ synchronous connection inside one blocking writer task and does not need an asyn
 Simple Profiler is a modular monolith compiled as one executable. The current runtime flow is:
 
 ```text
-tokio interval
-    │
-    ▼
-SystemCollector ── MetricBatch ──► bounded mpsc channel
-                                           │
-                                           ▼
-                                  blocking Storage writer
-                                           │
-                                           ▼
-                                    SQLite (WAL mode)
+Tokio interval ──► shared CollectionContext
+                         │
+                         ├──► SystemCollector
+                         ├──► DiskCollector
+                         └──► NetworkCollector
+                                   │
+                                   ▼
+                      combined successful MetricBatch
+                                   │
+                                   ▼
+                         bounded mpsc channel
+                                   │
+                                   ▼
+                      blocking SQLite WAL writer
 ```
 
-The CLI assembles configuration and chooses an operation. `run` starts collection and the storage
-writer; `status` opens the same SQLite database and reads its sample count and time range.
+The CLI assembles configuration and chooses an operation. `run` starts all collectors and the
+storage writer; `status` opens the same SQLite database and reads its sample count and time range.
+Each cycle supplies one UTC timestamp and elapsed monotonic duration to every collector. Successful
+results are combined into one transaction; one unavailable collector does not discard the others.
+Disk and network rate metrics warm up for one cycle before emission.
 
 ### Key Principles
 
@@ -87,7 +94,9 @@ writer; `status` opens the same SQLite database and reads its sample count and t
 ├── docs/                  # Architecture, domain, and coding references
 ├── src/
 │   ├── collector/
-│   │   ├── mod.rs         # Collector contract and shared error type
+│   │   ├── disk.rs        # Disk capacity and I/O collector
+│   │   ├── mod.rs         # Collector contract, context, and shared error type
+│   │   ├── network.rs     # Interface transfer and error collector
 │   │   └── system.rs      # CPU and memory collector
 │   ├── config.rs          # TOML model, defaults, and validation
 │   ├── lib.rs             # Library module exports
@@ -110,7 +119,8 @@ are TBD — not yet designed.
 ## 5. Domain Models (High-Level)
 
 The current persistent model is a timestamped metric sample. Each collection cycle produces one
-transient batch containing total CPU, per-core CPU, and memory metrics.
+transient batch containing the results from every successful collector. Disk and network samples
+use the optional `resource` field for a mount point or interface name.
 
 ```text
 CollectionCycle 1──* MetricSample
@@ -126,7 +136,7 @@ Simple Profiler has a CLI interface and no HTTP interface yet.
 
 | Command | Purpose | Important options |
 |---|---|---|
-| `simple-profiler run` | Collect until interrupted or a sample limit is reached | `--database`, `--interval-seconds`, `--samples` |
+| `simple-profiler run` | Collect CPU, memory, disk, and network metrics until interrupted or a sample limit is reached | `--database`, `--interval-seconds`, `--samples` |
 | `simple-profiler status` | Print database path, metric row count, and stored time range | `--database` |
 
 The global `--config <PATH>` option loads TOML settings. The local dashboard and report commands
@@ -136,7 +146,10 @@ are TBD — not yet designed.
 
 | Task | Trigger | Current behavior |
 |---|---|---|
-| System metric collection | Tokio interval; five seconds by default | Refresh CPU and memory, normalize the results, and send one batch to storage |
+| Collection cycle | Tokio interval; five seconds by default | Create one shared timestamp/elapsed context, run all collectors, and combine successful results |
+| System metric collection | Each cycle | Refresh total/per-core CPU and memory metrics |
+| Disk metric collection | Each cycle | Refresh capacity every cycle; emit I/O delta and rate after one warm-up cycle |
+| Network metric collection | Each cycle | Emit per-interface transfer, packet, error, and rate metrics after one warm-up cycle |
 | SQLite writer | Each received batch | Insert the complete batch inside one transaction |
 | Graceful shutdown | Ctrl-C or `--samples` limit | Close the channel, drain queued batches, then stop |
 
@@ -145,23 +158,25 @@ yet designed.
 
 ## 8. External Service Integrations
 
-The implemented runtime has no external service or network integration. `sysinfo` is an in-process
-platform abstraction, and bundled SQLite is compiled with the application. Future NVIDIA, AMD, and
-Apple GPU adapter choices are TBD — not yet designed.
+The implemented runtime has no external service or network integration. `sysinfo` is the in-process
+platform abstraction for CPU, memory, disk, and network data, and bundled SQLite is compiled with
+the application. Future NVIDIA, AMD, and Apple GPU adapter choices are TBD — not yet designed.
 
 ## 9. Database / Data Stores
 
-The application owns one client-embedded SQLite database. The schema is created idempotently from
-[`../src/storage.rs`](../src/storage.rs); there is no separate migration framework yet.
+The application owns one client-embedded SQLite database. [`../src/storage.rs`](../src/storage.rs)
+creates and upgrades the schema transactionally using SQLite `user_version`. Schema version 1 adds
+resource identity while preserving rows from the original unversioned schema.
 
 | Table | Purpose | Indexes |
 |---|---|---|
-| `metric_samples` | One normalized measurement per timestamp, collector, metric name, value, and unit | `collected_at`; `(metric_name, collected_at)` |
+| `metric_samples` | One normalized measurement per timestamp, collector, optional resource, metric name, value, and unit | `collected_at`; `(metric_name, collected_at)`; `(metric_name, resource, collected_at)` |
 
 SQLite runs in WAL mode with a five-second busy timeout. Metric batches are written inside a
-transaction. Retention duration, rollup tables, schema versioning, and database size limits are
-TBD — not yet designed. Because this is an embedded local store, the server-database observation
-module does not apply.
+transaction. Retention duration, rollup tables, and database size limits are TBD — not yet
+designed. Schema versioning itself is implemented; the next version number will be assigned when
+another migration is required. Because this is an embedded local store, the server-database
+observation module does not apply.
 
 ## 10. Environments & Deployment
 
@@ -186,4 +201,3 @@ Configuration precedence is:
 Secrets are not currently required. The default database path is
 `data/simple-profiler.sqlite3`, the interval is five seconds, and the bounded channel capacity is
 128 batches.
-

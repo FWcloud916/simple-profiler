@@ -4,13 +4,13 @@ A local-first Rust service that continuously records system metrics for later di
 
 ## What it does
 
-- Collects total and per-core CPU usage plus memory usage at a configurable interval.
-- Sends metric batches through a bounded channel to one SQLite writer.
-- Stores timestamped samples in a local SQLite database using WAL mode.
+- Collects CPU, memory, disk capacity/I/O, and network transfer metrics at a configurable interval.
+- Combines successful collectors into one cycle batch and sends it through a bounded channel.
+- Stores timestamped, resource-aware samples in a local SQLite database using one WAL writer.
 - Reports the number and time range of stored samples from the command line.
 
-Disk, network, GPU, anomaly detection, retention, reports, and the dashboard are planned but
-are not implemented yet.
+GPU, anomaly detection, retention, reports, and the dashboard are planned but are not implemented
+yet.
 
 ## Quickstart
 
@@ -72,4 +72,3 @@ DESIGN.md      Planned dashboard design contract
 | [docs/domain-models.md](docs/domain-models.md) | Metric data and planned diagnostic entities |
 | [docs/coding-style.md](docs/coding-style.md) | Rust formatting, linting, and project conventions |
 | [DESIGN.md](DESIGN.md) | Planned dashboard design tokens and visual rules |
-
