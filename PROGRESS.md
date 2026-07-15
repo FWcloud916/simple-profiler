@@ -1,11 +1,12 @@
 # Simple Profiler — Progress
 
-> **Last session:** 2026-07-16 · commit `b7b5f41` · tests: passing (74)
+> **Last session:** 2026-07-16 · commit `fdd20ce` · tests: passing (70)
 
 ## Now (WIP = 1)
 
-No feature is active. Multi-resource process attribution is committed and the per-user LaunchAgent
-now runs schema v6. The optional root GPU helper remains intentionally uninstalled.
+No feature is active. GPU monitoring is fully retired; the per-user LaunchAgent runs schema v7 and
+continues CPU, memory, disk, network, process, anomaly, report, and dashboard behavior. The former
+root GPU LaunchDaemon, executable, plist, snapshot, configuration, and historical data are absent.
 
 ## Feature list
 
@@ -18,7 +19,7 @@ now runs schema v6. The optional root GPU helper remains intentionally uninstall
 | 5 | Record bounded multi-resource process snapshots, rollups, and event attribution | `cargo test` | passing |
 | 6 | Generate a local HTML diagnostic report for a selected time range | `cargo test` | passing |
 | 7 | Explore metrics and events in a local dashboard | `cargo test` | passing |
-| 8 | Collect GPU measurements through capability-aware platform adapters | `cargo test` | passing |
+| 8 | Retire unreliable GPU monitoring and remove its privileged helper/data | `cargo test` | retired |
 | 9 | Install and supervise the profiler as an operating-system background service | `cargo test` | passing |
 
 ## Done
@@ -158,6 +159,18 @@ now runs schema v6. The optional root GPU helper remains intentionally uninstall
 - Production Top 5 checks returned real process network and disk rates: the observed leader showed
   8.38 KiB/s receive, 42.40 KiB/s transmit, 589.54 KiB/s disk read, and 690.67 KiB/s disk write.
   Process rollup backfill began on the single writer in bounded 60-bucket maintenance batches.
+- Commit `fdd20ce` removes system and process GPU collectors, configuration, CLI sorting, schema
+  fields, report/dashboard surfaces, helper binary/template, and the `plist` dependency. Schema v7
+  transactionally purges GPU metrics, rollups, capabilities, linked anomaly history, and rebuilds
+  process tables without GPU columns while preserving all other rows.
+- Verification passes 70 tests, rustfmt, strict Clippy, release build, JavaScriptCore syntax, and a
+  production-backup migration smoke test. The 46.8 MB copy migrated to v7 with `integrity_check=ok`,
+  zero GPU rows/capabilities/columns, and 14,799 preserved process samples.
+- After automatic upgrade, the user LaunchAgent runs as PID 20575 on schema v7 with fresh metric
+  and process samples. The production database has no GPU rows, rollups, capabilities, or process
+  columns; its integrity check is `ok`. The root GPU LaunchDaemon and all three system artifacts
+  were unloaded and deleted. A verified pre-removal backup is retained under
+  `~/Documents/private/simple-profiler-backups/20260716-011043/`.
 
 ## Blockers
 
@@ -165,12 +178,14 @@ None.
 
 ## Next steps
 
-1. Separately decide whether to install the optional root GPU helper LaunchDaemon.
-2. Observe real disk/network attribution and tune per-dimension top-N limits if necessary.
-3. Confirm the bounded process rollup backfill reaches the current completed minute/quarter-hour.
+1. Observe real disk/network attribution and tune per-dimension top-N limits if necessary.
+2. Confirm the bounded process rollup backfill reaches the current completed minute/quarter-hour.
 
 ## Decision log
 
+- 2026-07-16 — Retire GPU monitoring completely. Schema v7 purges its historical data and columns;
+  runtime, CLI, report, dashboard, documentation, dependencies, root helper, and LaunchDaemon no
+  longer expose or install GPU behavior. Preserve a verified pre-migration backup for rollback.
 - 2026-07-15 — Store a capped union of CPU, memory, disk read/write, network receive/transmit, and
   optional GPU rankings in schema v6; retain raw/1-minute/15-minute process data for 24h/7d/90d.
 - 2026-07-15 — Use macOS `nettop` as the standard non-privileged process-network provider. Join by
