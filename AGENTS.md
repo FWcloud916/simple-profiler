@@ -7,6 +7,8 @@ Simple Profiler owns local collection and diagnostic storage of host resource me
 - MUST run `cargo test` successfully before declaring work done (source: README verification gate).
 - MUST run `cargo fmt --check` and Clippy before declaring Rust changes done (source: `rustfmt.toml` and `clippy.toml`).
 - MUST keep SQLite writes behind the single writer task (source: `docs/project-overview.md` §3).
+- MUST commit raw samples, anomaly transitions, evidence, and restored state in one writer
+  transaction (source: `docs/project-overview.md` §3).
 - MUST keep collector-to-storage channels bounded (source: `docs/project-overview.md` §3).
 - MUST update `PROGRESS.md` at clock-out (source: selected agent-harness workflow).
 - MUST NOT install, unload, uninstall, or purge the macOS LaunchAgent without explicit user
@@ -29,6 +31,8 @@ Read the matching doc before non-trivial work. Small fixes and running checks ca
 cargo build
 cargo build --release
 cargo run -- run
+cargo run -- events list
+cargo run -- events show 1
 target/release/simple-profiler service status
 cargo test
 cargo fmt --check
@@ -47,6 +51,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 - Collector implementations live under `src/collector/` and return `MetricBatch` values.
 - Blocking SQLite work stays in the storage writer's blocking task.
+- Anomaly rules and state transitions live in `src/anomaly.rs`; their SQLite representation and
+  evidence queries live in `src/anomaly_storage.rs`.
 - Implemented and planned behavior MUST be labeled separately in documentation.
 
 ## Docs maintenance

@@ -50,7 +50,8 @@ transaction boundary but has no database identifier or table.
 
 **Status: implemented, read model.** Contains schema version; row count and optional oldest/newest
 time for raw, one-minute, and 15-minute data; database/WAL/reusable-page sizes; both rollup
-watermarks; and the last maintenance time/result. It is not persisted as one object.
+watermarks; last maintenance time/result; open warning/critical counts; and the latest event time.
+It is not persisted as one object.
 
 ### MetricRollup
 
@@ -85,8 +86,26 @@ TBD — not yet designed.
 
 ### Event
 
-**Status: planned — no schema yet.** Will represent a bounded abnormal period with severity,
-trigger evidence, and related metrics. Thresholds and lifecycle states are TBD — not yet designed.
+**Status: implemented in SQLite as `anomaly_events`.** An event is a sustained abnormal period for
+one rule and normalized resource. It stores `open` or `closed` status; `warning` or `critical`
+severity; collector, metric, resource, and unit identity; start, detection, peak, last-sample, and
+optional end timestamps; configured thresholds; peak/last values; sample count; and data-gap
+count. A warning event can escalate to critical but does not downgrade before it closes.
+
+### AnomalyRuleState
+
+**Status: implemented in SQLite as `anomaly_states`.** The primary key is `(rule_id, resource)`.
+The stored phase is `normal`, `pending`, `open`, or `recovering`; optional warning/critical
+severity, candidate timestamps/sample counts, active event ID, latest value/time, peak, evidence
+time, and data-gap count allow evaluation to continue across normal process restarts.
+
+### AnomalyEventEvidence
+
+**Status: implemented in SQLite as `anomaly_event_evidence`.** Each row identifies an event,
+timestamp, value, and evidence kind: `prelude`, `trigger`, `escalation`, `peak`, `periodic`, or
+`recovery`. Prelude capture is limited to the newest 120 matching raw rows within the configured
+window. Only the latest `peak` evidence row is retained, while periodic evidence is rate-limited.
+Evidence remains available after the corresponding raw samples expire.
 
 ### Report
 
@@ -101,14 +120,16 @@ Solid relationships are implemented; dotted descriptions are planned only.
 CollectionCycle (transient) 1──* MetricSample
 MetricSample *──* MetricRollup   (derived by matching series and time bucket; no foreign key)
 MaintenanceState ── stores ──► one-minute and 15-minute watermark keys
+AnomalyRuleState 0..1──0..1 Event
+Event 1──* AnomalyEventEvidence
 
 Device 1··* MetricSample     (planned — no schema yet)
-Event  *··* MetricSample     (planned — no schema yet)
 Report 1··* Event            (planned — no schema yet)
 ```
 
-The schema does not persist a collection-cycle ID, device ID, event ID, report ID, or foreign keys
-between samples and rollups. `resource` is descriptive text and is not a foreign key to the
+The schema does not persist a collection-cycle ID, device ID, report ID, or SQL foreign-key
+constraints. `anomaly_states.event_id` and `anomaly_event_evidence.event_id` are application-owned
+references to `anomaly_events.id`. `resource` is descriptive text and is not a foreign key to the
 planned Device entity.
 
 ## 3. Collection Flow
@@ -119,7 +140,8 @@ planned Device entity.
    UTC timestamp and optional elapsed time.
 3. `SystemCollector`, `DiskCollector`, and `NetworkCollector` run sequentially with that context.
 4. Collector failures are logged while successful results are combined into one batch.
-5. A non-empty batch is sent through the bounded channel and committed as one transaction.
+5. A non-empty batch is sent through the bounded channel and committed with anomaly evaluation as
+   one transaction.
 6. A sample limit, Ctrl-C, or SIGTERM stops collection, closes the channel, drains queued batches,
    and releases the process lock after the writer joins.
 
@@ -135,17 +157,22 @@ consumers interpret those missing delta intervals as zero activity.
 1. `spawn_writer` starts one blocking task that owns a `rusqlite::Connection`.
 2. Opening storage creates parent directories, enables WAL, sets a busy timeout, and runs the
    transactional schema upgrade.
-3. Each received `MetricBatch` is inserted inside one SQLite transaction.
-4. At the configured cadence, the same writer transaction recomputes up to the configured number
+3. Startup restores configured rule states from `anomaly_states`.
+4. For each received `MetricBatch`, the writer clones and evaluates the engine, then commits raw
+   samples, event transitions, evidence, and all next states inside one SQLite transaction. The
+   live engine advances only after commit succeeds.
+5. At the configured cadence, the same writer transaction recomputes up to the configured number
    of complete one-minute buckets, then derives complete 15-minute buckets from them.
-5. That transaction advances watermarks and deletes expired rows in bounded chunks, never deleting
-   data that its downstream tier has not processed.
-6. After commit, storage requests a passive WAL checkpoint. Automatic `VACUUM` is not performed.
-7. Shutdown drops the sender, drains queued batches, commits them, and joins the writer task.
+6. That transaction advances watermarks and deletes expired metrics and closed events in bounded
+   chunks, never deleting metric data that its downstream tier has not processed. Event evidence
+   is deleted before its closed event; open events are not retention candidates.
+7. After commit, storage requests a passive WAL checkpoint. Automatic `VACUUM` is not performed.
+8. Shutdown drops the sender, drains queued batches, commits them, and joins the writer task.
 
 Schema version 2 adds `collected_at_ms`, backfills v1 timestamps, and creates `metric_rollups` and
-`maintenance_state`. A database newer than the supported version is rejected rather than opened
-with an incompatible writer. Rollup buckets wait for the configured late-arrival grace period.
+`maintenance_state`. Schema version 3 creates the three anomaly tables and their query indexes. A
+database newer than the supported version is rejected rather than opened with an incompatible
+writer. Rollup buckets wait for the configured late-arrival grace period.
 One-minute aggregation reads raw rows in timestamp/ID order; 15-minute aggregation combines counts,
 sums, extremes, and the latest child value so averages remain weighted.
 
@@ -153,7 +180,41 @@ The runtime treats an unexpectedly stopped writer as an application error. Maint
 logged and do not stop collection. Retry and quarantine behavior for failed inserts is TBD — not
 yet designed.
 
-## 5. Metric Naming
+## 5. Anomaly Detection Flow
+
+[`../src/anomaly.rs`](../src/anomaly.rs) evaluates only finite, newer raw metric values whose exact
+name matches an enabled rule. State is independent per rule and resource:
+
+```text
+normal ── first breach ──► pending ── duration + sample count ──► open
+  ▲                           │                                      │
+  │                           └── clears/gap ──► normal              ├── sustained critical
+  │                                                                  │      └──► critical
+  │                                                                  ▼
+  └──────── recovery duration + sample count ◄── recovering ◄── recovery threshold
+```
+
+A candidate must satisfy both its elapsed duration and minimum sample count. A pending candidate
+that changes severity restarts its candidate window. Values between the recovery and warning
+thresholds neither recover nor reopen an event. A data gap larger than the rule maximum resets a
+pending candidate; for an open/recovering event it increments the gap count, clears escalation and
+recovery candidates, and leaves the event open. Duplicate or older timestamps are ignored.
+
+The tracked default rules are:
+
+| Rule / metric | Warning | Critical | Recovery | Maximum gap |
+|---|---|---|---|---|
+| `cpu-sustained-high` / `cpu.total.usage` | ≥90% for 120 s and 12 samples | ≥97% for 60 s and 12 samples | ≤75% for 60 s and 12 samples | 15 s |
+| `memory-pressure` / `memory.usage` | ≥90% for 300 s and 60 samples | ≥95% for 120 s and 24 samples | ≤85% for 120 s and 24 samples | 15 s |
+| `disk-space-low` / `disk.space.usage` | ≥90% for 60 s and 2 samples | ≥95% for 60 s and 2 samples | ≤88% for 60 s and 2 samples | 90 s |
+
+When an event opens, storage records up to five configured minutes of prelude samples plus the
+trigger. Later evaluations update the last value, peak, sample count, and gap count; escalation,
+newest peak, periodic, and final recovery evidence are preserved. The default periodic interval is
+60 seconds. Closed events and their evidence are retained for 365 days by default and removed in
+1,000-event maintenance chunks.
+
+## 6. Metric Naming
 
 The implemented names are:
 
@@ -179,7 +240,7 @@ The implemented names are:
 New collectors SHOULD follow dot-separated, stable names and MUST attach an explicit unit. A
 registry for validating names and units is TBD — not yet designed.
 
-## 6. Failure Behavior
+## 7. Failure Behavior
 
 - Invalid sampling/retention values, interval, channel capacity, or retention-tier ordering are
   rejected before the runtime starts.
@@ -189,23 +250,30 @@ registry for validating names and units is TBD — not yet designed.
 - A second process targeting the same database exits before it creates a channel or writer.
 - A writer panic or database error is returned when the writer task is joined.
 - SQLite transaction failure does not partially commit the affected batch.
+- SQLite transaction failure also leaves the live anomaly engine unchanged, so persisted and
+  in-memory state cannot diverge across a failed batch.
+- Invalid anomaly rule IDs, duplicate IDs, non-finite or unordered thresholds, zero sample limits,
+  and zero maximum gaps are rejected during configuration validation.
 - Rollup rows, cleanup, and watermarks commit in one transaction; a failed maintenance pass does
   not expose a partially advanced watermark.
 - `service stop` sends SIGTERM and fails if the process does not report stopped within 20 seconds.
 - `launchctl` failures include stderr context instead of being reported as successful lifecycle
   changes.
 
-Per-collector health state, missing-sample markers, and failure events are planned — no schema yet.
+Per-collector health state, explicit missing-sample markers, and collector-failure event rules are
+planned — no schema yet.
 
-## 7. Deprecated Components
+## 8. Deprecated Components
 
 N/A — the initial version has no deprecated domain components.
 
-## 8. Developer Tooling / Maintenance Scripts
+## 9. Developer Tooling / Maintenance Scripts
 
 No separate domain maintenance scripts exist. The writer performs rollup and retention maintenance
-internally. The `status` command shows raw/rollup ranges, storage sizes, watermarks, and the last
-maintenance result. On macOS, the `service` command group implements this lifecycle:
+internally. The `status` command shows raw/rollup ranges, storage sizes, watermarks, maintenance,
+and open-event counts. `events list` lists recent or open events and `events show` renders one
+event's thresholds, measurements, counts, and evidence. On macOS, the `service` command group
+implements this lifecycle:
 
 ```text
 uninstalled ── install ──► loaded/running
@@ -216,7 +284,7 @@ uninstalled ── install ──► loaded/running
 ```
 
 Install and upgrade write the executable and plist atomically and preserve an existing private
-configuration. Status combines parsed `launchctl` state with the latest sample and maintenance
-state. Normal uninstall removes only the service binary/plist; `--purge` also removes
-configuration, metrics, and logs. Startup applies built-in schema upgrades; manual compaction and
-repair commands are TBD — not yet designed.
+configuration. Status combines parsed `launchctl` state with the latest sample, maintenance state,
+and open anomaly counts. Normal uninstall removes only the service binary/plist; `--purge` also
+removes configuration, metrics, and logs. Startup applies built-in schema upgrades; manual
+compaction and repair commands are TBD — not yet designed.

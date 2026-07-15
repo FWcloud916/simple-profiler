@@ -1,11 +1,11 @@
 # Simple Profiler — Progress
 
-> **Last session:** 2026-07-15 · commit `b43a981` · tests: passing
+> **Last session:** 2026-07-15 · commit `c08b2f3` · tests: passing
 
 ## Now (WIP = 1)
 
-No feature is active. macOS background-service management is implemented; sustained anomaly
-detection remains the next product feature.
+No feature is active. Sustained anomaly detection and evidence retention are implemented; local
+HTML diagnostic reports are the next product feature.
 
 ## Feature list
 
@@ -14,7 +14,7 @@ detection remains the next product feature.
 | 1 | Record CPU and memory measurements in SQLite and inspect stored range | `cargo test` | passing |
 | 2 | Record disk capacity/I/O and network transfer measurements | `cargo test` | passing |
 | 3 | Enforce raw-data retention and create time rollups | `cargo test` | passing |
-| 4 | Detect sustained resource anomalies and preserve event evidence | `cargo test` | not_started |
+| 4 | Detect sustained resource anomalies and preserve event evidence | `cargo test` | passing |
 | 5 | Generate a local HTML diagnostic report for a selected time range | `cargo test` | not_started |
 | 6 | Explore metrics and events in a local dashboard | `cargo test` | not_started |
 | 7 | Collect GPU measurements through capability-aware platform adapters | `cargo test` | not_started |
@@ -48,7 +48,18 @@ detection remains the next product feature.
 - File logs rotate at a configurable size with a bounded number of retained files; routine
   collection-cycle entries use debug level.
 - The service phase passes 26 tests, `plutil`, rustfmt, strict Clippy, release build, SIGTERM, and
-  competing-process integration checks. No real LaunchAgent was loaded without user approval.
+  competing-process integration checks. After explicit approval, the user installed the
+  LaunchAgent and live status confirmed that background samples continued advancing.
+- Configurable CPU, memory, and per-mount disk-space anomaly rules implemented with warning,
+  critical escalation, hysteresis recovery, duration/sample gates, and data-gap handling.
+- SQLite schema v3 persists anomaly events, restart-safe rule state, and bounded prelude/trigger/
+  escalation/peak/periodic/recovery evidence in the same transaction as raw samples.
+- `events list`, `events show`, `status`, and `service status` expose event history, evidence, and
+  open warning/critical counts.
+- Closed events default to 365-day retention with bounded cleanup; evidence remains after raw
+  samples expire, and open/pending state resumes across process restarts.
+- The anomaly phase passes 35 tests, rustfmt, strict Clippy, v2-to-v3 migration, restart/recovery,
+  evidence-retention, and command-line smoke checks.
 
 ## Blockers
 
@@ -56,14 +67,23 @@ None.
 
 ## Next steps
 
-1. With explicit approval, install the release LaunchAgent and verify live stop/restart and
-   continued collection outside the terminal.
-2. Define anomaly rules, duration thresholds, and the event evidence model.
-3. Decide whether anomaly evaluation reads raw samples, rollups, or both.
-4. Define report queries that select the appropriate raw or rolled-up resolution.
+1. Define the local HTML report request, time-range selection, and output contract.
+2. Define report queries that choose raw, one-minute, or 15-minute data by requested range.
+3. Design report sections that combine resource summaries, anomaly timelines, and evidence.
+4. With explicit approval, build a release binary, upgrade the installed LaunchAgent, and verify
+   that schema v3 migration and event collection work against the live service database.
 
 ## Decision log
 
+- 2026-07-15 — Evaluate anomaly rules from incoming raw batches inside the single SQLite writer;
+  raw samples, event changes, evidence, and restart state commit atomically.
+- 2026-07-15 — Use `normal → pending → open → recovering → normal` with warning-to-critical
+  escalation, hysteresis recovery, duration plus sample-count gates, and explicit data-gap rules.
+- 2026-07-15 — Start with sustained total CPU, memory usage, and per-mount disk-space rules; defer
+  per-core CPU, disk I/O, and network anomaly rules until their cardinality/sparse semantics are
+  designed.
+- 2026-07-15 — Preserve bounded prelude, trigger, escalation, latest peak, periodic, and recovery
+  evidence independently of raw retention; retain closed events for 365 days by default.
 - 2026-07-15 — Identify disk and network samples with an optional `resource` field and migrate
   existing SQLite rows without data loss.
 - 2026-07-15 — Retain raw samples for 24 hours, one-minute rollups for 30 days, and 15-minute
