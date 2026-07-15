@@ -44,6 +44,32 @@
       <label class="auto-refresh"><input id="autoRefresh" type="checkbox" checked>Auto-refresh</label>
     </nav>
 
+    <section class="timeline-panel" aria-labelledby="timelineHeading">
+      <div class="timeline-head">
+        <div>
+          <p class="eyebrow">TIME NAVIGATOR</p>
+          <h2 id="timelineHeading">Browse history</h2>
+        </div>
+        <p id="timelineHint" class="section-meta">Drag the window or drag any chart horizontally.</p>
+      </div>
+      <div class="timeline-controls">
+        <button id="timelineEarlier" class="button timeline-step" type="button" aria-label="Move to an earlier time window">← Earlier</button>
+        <div class="timeline-slider-shell">
+          <div class="timeline-track" aria-hidden="true">
+            <span id="timelineWindow" class="timeline-window"></span>
+          </div>
+          <input id="timelineSlider" type="range" min="0" max="1000" step="1" value="1000" aria-label="Move selected time window through retained history">
+          <div class="timeline-labels" aria-hidden="true">
+            <span id="timelineOldest">No history</span>
+            <strong id="timelineSelection">Loading window…</strong>
+            <span id="timelineNewest">No history</span>
+          </div>
+        </div>
+        <button id="timelineLater" class="button timeline-step" type="button" aria-label="Move to a later time window">Later →</button>
+        <button id="timelineLive" class="button primary" type="button">Live</button>
+      </div>
+    </section>
+
     <main>
       <section aria-labelledby="overviewHeading">
         <div class="section-heading">

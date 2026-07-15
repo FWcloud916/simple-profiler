@@ -7,7 +7,10 @@
     status: null,
     processSort: "cpu",
     refreshing: false,
+    refreshQueued: false,
     timer: null,
+    navigationTimer: null,
+    liveRange: "1h",
   };
 
   const elements = {
@@ -19,6 +22,15 @@
     from: document.querySelector("#fromInput"),
     to: document.querySelector("#toInput"),
     autoRefresh: document.querySelector("#autoRefresh"),
+    timelineEarlier: document.querySelector("#timelineEarlier"),
+    timelineLater: document.querySelector("#timelineLater"),
+    timelineLive: document.querySelector("#timelineLive"),
+    timelineSlider: document.querySelector("#timelineSlider"),
+    timelineWindow: document.querySelector("#timelineWindow"),
+    timelineOldest: document.querySelector("#timelineOldest"),
+    timelineNewest: document.querySelector("#timelineNewest"),
+    timelineSelection: document.querySelector("#timelineSelection"),
+    timelineHint: document.querySelector("#timelineHint"),
     cards: document.querySelector("#summaryCards"),
     coverage: document.querySelector("#coverageNotice"),
     rangeLabel: document.querySelector("#rangeLabel"),
@@ -59,7 +71,10 @@
   }
 
   async function refresh() {
-    if (state.refreshing) return;
+    if (state.refreshing) {
+      state.refreshQueued = true;
+      return;
+    }
     state.refreshing = true;
     elements.refresh.disabled = true;
     setConnection("loading", "Refreshing");
@@ -79,12 +94,18 @@
     } finally {
       state.refreshing = false;
       elements.refresh.disabled = false;
-      scheduleRefresh();
+      if (state.refreshQueued) {
+        state.refreshQueued = false;
+        refresh();
+      } else {
+        scheduleRefresh();
+      }
     }
   }
 
   function render() {
     renderOverview();
+    renderTimeline();
     renderCharts();
     renderEvents();
     renderStorage();
@@ -147,6 +168,107 @@
     elements.coverage.classList.remove("loading-block");
   }
 
+  function timelineBounds() {
+    if (!state.snapshot || !state.status) return null;
+    const datasets = [state.status.raw, state.status.minute, state.status.quarter_hour];
+    const oldestValues = datasets.map((dataset) => dataset.oldest_ms).filter((value) => value != null);
+    const newestValues = datasets.map((dataset) => dataset.newest_ms).filter((value) => value != null);
+    if (!oldestValues.length || !newestValues.length) return null;
+    const coverageStart = Math.min(...oldestValues);
+    const coverageEnd = Math.max(...newestValues);
+    const duration = Math.max(1, state.snapshot.range.to_ms - state.snapshot.range.from_ms);
+    const minimumStart = coverageStart;
+    const maximumStart = Math.max(minimumStart, coverageEnd - duration);
+    return { coverageStart, coverageEnd, duration, minimumStart, maximumStart };
+  }
+
+  function renderTimeline() {
+    const bounds = timelineBounds();
+    if (!bounds) {
+      elements.timelineSlider.disabled = true;
+      elements.timelineEarlier.disabled = true;
+      elements.timelineLater.disabled = true;
+      elements.timelineLive.disabled = Boolean(state.range.last);
+      elements.timelineWindow.style.left = "0%";
+      elements.timelineWindow.style.width = "100%";
+      elements.timelineOldest.textContent = "No history";
+      elements.timelineNewest.textContent = "No history";
+      elements.timelineSelection.textContent = "No retained timeline";
+      return;
+    }
+    const start = clamp(state.snapshot.range.from_ms, bounds.minimumStart, bounds.maximumStart);
+    updateTimelinePreview(start, bounds);
+    const movable = bounds.maximumStart - bounds.minimumStart > 1_000;
+    elements.timelineSlider.disabled = !movable;
+    elements.timelineEarlier.disabled = !movable || start <= bounds.minimumStart + 1_000;
+    elements.timelineLater.disabled = !movable || start >= bounds.maximumStart - 1_000;
+    elements.timelineLive.disabled = Boolean(state.range.last);
+    elements.timelineHint.textContent = movable
+      ? "Drag the window or drag any chart horizontally. Arrow keys move a focused chart."
+      : "The selected window already contains all retained history.";
+  }
+
+  function updateTimelinePreview(start, bounds) {
+    const movableSpan = Math.max(0, bounds.maximumStart - bounds.minimumStart);
+    const sliderValue = movableSpan === 0 ? 0 : ((start - bounds.minimumStart) / movableSpan) * 1_000;
+    const coverageSpan = Math.max(1, bounds.coverageEnd - bounds.coverageStart);
+    const left = clamp(((start - bounds.coverageStart) / coverageSpan) * 100, 0, 100);
+    const width = clamp((bounds.duration / coverageSpan) * 100, 0, 100 - left);
+    const visualWidth = Math.max(0.8, width);
+    const visualLeft = Math.min(left, 100 - visualWidth);
+    elements.timelineSlider.value = String(Math.round(sliderValue));
+    elements.timelineWindow.style.left = `${visualLeft}%`;
+    elements.timelineWindow.style.width = `${visualWidth}%`;
+    elements.timelineOldest.textContent = formatShortTime(bounds.coverageStart);
+    elements.timelineNewest.textContent = formatShortTime(bounds.coverageEnd);
+    elements.timelineSelection.textContent = `${formatShortTime(start)} → ${formatShortTime(start + bounds.duration)}`;
+  }
+
+  function timelineStartFromSlider() {
+    const bounds = timelineBounds();
+    if (!bounds) return null;
+    const position = Number(elements.timelineSlider.value) / 1_000;
+    return {
+      bounds,
+      start: bounds.minimumStart + position * (bounds.maximumStart - bounds.minimumStart),
+    };
+  }
+
+  function navigateToStart(requestedStart, immediate = true) {
+    const bounds = timelineBounds();
+    if (!bounds) return;
+    const start = clamp(requestedStart, bounds.minimumStart, bounds.maximumStart);
+    const end = start + bounds.duration;
+    state.range = { from: new Date(start).toISOString(), to: new Date(end).toISOString() };
+    clearPresetSelection();
+    elements.autoRefresh.checked = false;
+    updateTimelinePreview(start, bounds);
+    elements.rangeLabel.textContent = `${formatTime(start)} → ${formatTime(end)}`;
+    window.clearTimeout(state.timer);
+    window.clearTimeout(state.navigationTimer);
+    if (immediate) {
+      refresh();
+    } else {
+      state.navigationTimer = window.setTimeout(refresh, 180);
+    }
+  }
+
+  function shiftTimeline(fraction) {
+    if (!state.snapshot) return;
+    const duration = state.snapshot.range.to_ms - state.snapshot.range.from_ms;
+    navigateToStart(activeWindowStart() + duration * fraction);
+  }
+
+  function activeWindowStart() {
+    const explicit = state.range.from ? Date.parse(state.range.from) : Number.NaN;
+    return Number.isFinite(explicit) ? explicit : state.snapshot.range.from_ms;
+  }
+
+  function goLive() {
+    elements.autoRefresh.checked = true;
+    setPreset(state.liveRange);
+  }
+
   function summaryCard(item) {
     const card = element("article", "summary-card");
     const top = element("div", "summary-card-top");
@@ -200,6 +322,7 @@
   function renderSvgChart(series) {
     const frame = element("div", "chart-frame");
     const svg = svgElement("svg", { viewBox: "0 0 700 190", role: "img", "aria-label": `${metricLabel(series.metric_name)} trend` });
+    enableChartNavigation(frame, svg, metricLabel(series.metric_name));
     [20, 60, 100, 140, 180].forEach((y) => svg.append(svgElement("line", { x1: 0, y1: y, x2: 700, y2: y, class: "chart-grid-line" })));
     if (!series.points.length) {
       frame.append(svg);
@@ -224,6 +347,54 @@
     });
     frame.append(svg);
     return frame;
+  }
+
+  function enableChartNavigation(frame, svg, label) {
+    let pointerId = null;
+    let startX = 0;
+    let deltaX = 0;
+    frame.tabIndex = 0;
+    frame.setAttribute("role", "group");
+    frame.setAttribute("aria-label", `${label} time chart. Drag horizontally or use left and right arrow keys to move through history.`);
+    frame.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || !timelineBounds()) return;
+      pointerId = event.pointerId;
+      startX = event.clientX;
+      deltaX = 0;
+      frame.classList.add("dragging");
+      frame.setPointerCapture(pointerId);
+    });
+    frame.addEventListener("pointermove", (event) => {
+      if (event.pointerId !== pointerId) return;
+      deltaX = event.clientX - startX;
+      svg.style.transform = `translateX(${deltaX}px)`;
+    });
+    const finishDrag = (event) => {
+      if (event.pointerId !== pointerId) return;
+      if (frame.hasPointerCapture(pointerId)) frame.releasePointerCapture(pointerId);
+      pointerId = null;
+      frame.classList.remove("dragging");
+      svg.style.transform = "";
+      if (Math.abs(deltaX) < 8 || frame.clientWidth <= 0 || !state.snapshot) return;
+      const duration = state.snapshot.range.to_ms - state.snapshot.range.from_ms;
+      navigateToStart(activeWindowStart() - (deltaX / frame.clientWidth) * duration);
+    };
+    frame.addEventListener("pointerup", finishDrag);
+    frame.addEventListener("pointercancel", finishDrag);
+    frame.addEventListener("keydown", (event) => {
+      const bounds = timelineBounds();
+      if (!bounds) return;
+      const actions = {
+        ArrowLeft: () => shiftTimeline(-0.2),
+        ArrowRight: () => shiftTimeline(0.2),
+        Home: () => navigateToStart(bounds.minimumStart),
+        End: () => navigateToStart(bounds.maximumStart),
+      };
+      const action = actions[event.key];
+      if (!action) return;
+      event.preventDefault();
+      action();
+    });
   }
 
   function renderEvents() {
@@ -366,6 +537,7 @@
   }
 
   function setPreset(range) {
+    state.liveRange = range;
     state.range = { last: range };
     elements.presets.querySelectorAll("button").forEach((button) => {
       const selected = button.dataset.range === range;
@@ -385,12 +557,17 @@
       return;
     }
     state.range = { from: from.toISOString(), to: to.toISOString() };
+    clearPresetSelection();
+    elements.autoRefresh.checked = false;
+    elements.custom.open = false;
+    refresh();
+  }
+
+  function clearPresetSelection() {
     elements.presets.querySelectorAll("button").forEach((button) => {
       button.classList.remove("selected");
       button.setAttribute("aria-pressed", "false");
     });
-    elements.custom.open = false;
-    refresh();
   }
 
   function scheduleRefresh() {
@@ -479,6 +656,19 @@
   elements.presets.addEventListener("click", (event) => { const button = event.target.closest("button[data-range]"); if (button) setPreset(button.dataset.range); });
   elements.customForm.addEventListener("submit", applyCustomRange);
   elements.autoRefresh.addEventListener("change", scheduleRefresh);
+  elements.timelineEarlier.addEventListener("click", () => shiftTimeline(-0.8));
+  elements.timelineLater.addEventListener("click", () => shiftTimeline(0.8));
+  elements.timelineLive.addEventListener("click", goLive);
+  elements.timelineSlider.addEventListener("input", () => {
+    const position = timelineStartFromSlider();
+    if (position) navigateToStart(position.start, false);
+  });
+  elements.timelineSlider.addEventListener("change", () => {
+    const position = timelineStartFromSlider();
+    if (!position) return;
+    window.clearTimeout(state.navigationTimer);
+    navigateToStart(position.start);
+  });
   elements.sortCpu.addEventListener("click", () => { state.processSort = "cpu"; toggleSort(); renderProcesses(); });
   elements.sortMemory.addEventListener("click", () => { state.processSort = "memory"; toggleSort(); renderProcesses(); });
   elements.closeDialog.addEventListener("click", () => elements.dialog.close());

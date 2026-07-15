@@ -323,4 +323,15 @@ mod tests {
         assert!(INDEX_HTML.contains("Simple Profiler"));
         assert!(APP_JS.contains("api/v1/snapshot"));
     }
+
+    #[test]
+    fn embedded_dashboard_exposes_bounded_timeline_navigation() {
+        assert!(INDEX_HTML.contains("id=\"timelineSlider\""));
+        assert!(INDEX_HTML.contains("id=\"timelineLive\""));
+        assert!(APP_JS.contains("navigateToStart"));
+        assert!(APP_JS.contains("pointerdown"));
+        assert!(APP_JS.contains("ArrowLeft"));
+        assert!(APP_JS.contains("window.setTimeout(refresh, 180)"));
+        assert!(APP_CSS.contains("touch-action: pan-y"));
+    }
 }
