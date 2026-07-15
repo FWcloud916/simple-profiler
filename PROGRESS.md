@@ -1,6 +1,6 @@
 # Simple Profiler — Progress
 
-> **Last session:** 2026-07-15 · commit `4add7b7` · tests: passing
+> **Last session:** 2026-07-15 · commit `643add5` · tests: passing
 
 ## Now (WIP = 1)
 
@@ -48,4 +48,3 @@ None.
 - 2026-07-15 — Develop macOS first while keeping collectors adapter-oriented for later Linux and
   Windows support.
 - 2026-07-15 — Track the agent harness and dashboard design modules in the repository.
-
