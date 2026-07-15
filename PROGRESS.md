@@ -1,11 +1,11 @@
 # Simple Profiler — Progress
 
-> **Last session:** 2026-07-15 · commit `e4c0f4c` · tests: passing (66)
+> **Last session:** 2026-07-15 · commit `63f42d6` · tests: passing (66)
 
 ## Now (WIP = 1)
 
-No feature is active. Retained-history sliding is implemented for the dashboard; upgrading the
-installed binary to expose it through the managed launcher still requires explicit user approval.
+No feature is active. The installed LaunchAgent and managed dashboard launcher now run the
+retained-history timeline release, and background collection remains healthy after the upgrade.
 
 ## Feature list
 
@@ -120,6 +120,10 @@ installed binary to expose it through the managed launcher still requires explic
 - Timeline navigation reuses the existing bounded read-only `from`/`to` snapshot API without schema
   changes or dependencies. The phase passes 66 tests, JavaScriptCore syntax, rustfmt, strict Clippy,
   release build, embedded-interaction regression checks, and a live explicit-range API smoke test.
+- After explicit user approval, the installed LaunchAgent was upgraded to the timeline release and
+  restarted as PID 38158. The managed dashboard exposed the slider, Earlier/Later/Live controls,
+  and retained-history label; system/process sample timestamps continued advancing after the
+  temporary dashboard verification process stopped.
 
 ## Blockers
 
@@ -127,11 +131,9 @@ None.
 
 ## Next steps
 
-1. After explicit approval, upgrade the installed binary to the timeline-navigation release and
-   verify the managed `simple-profiler dashboard` command serves it.
-2. Design NVIDIA and AMD adapters without weakening field-level capability semantics.
-3. Decide whether GPU anomaly rules are useful after observing real retained workloads.
-4. Inspect the first naturally occurring CPU or memory anomaly to validate its preserved process
+1. Design NVIDIA and AMD adapters without weakening field-level capability semantics.
+2. Decide whether GPU anomaly rules are useful after observing real retained workloads.
+3. Inspect the first naturally occurring CPU or memory anomaly to validate its preserved process
    evidence in reports and the dashboard.
 
 ## Decision log
