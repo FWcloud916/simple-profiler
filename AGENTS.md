@@ -34,6 +34,7 @@ cargo run -- run
 cargo run -- events list
 cargo run -- events show 1
 cargo run -- processes top --sort cpu
+cargo run -- report generate --last 1h
 target/release/simple-profiler service status
 cargo test
 cargo fmt --check
@@ -57,6 +58,8 @@ cargo clippy --all-targets --all-features -- -D warnings
   evidence queries live in `src/anomaly_storage.rs`.
 - Process snapshot persistence, ranking queries, retention, and anomaly attribution live in
   `src/process_storage.rs` and remain owned by the single writer transaction.
+- Report time-range parsing and HTML rendering live in `src/report.rs`; bounded, read-only report
+  queries and retention-tier selection live in `src/report_storage.rs`.
 - Implemented and planned behavior MUST be labeled separately in documentation.
 
 ## Docs maintenance

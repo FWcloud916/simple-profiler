@@ -114,6 +114,12 @@ Documentation MUST distinguish implemented behavior from `planned — no schema 
 - The channel between collection and storage MUST remain bounded.
 - CLI parsing and override precedence belong in `src/main.rs`; reusable behavior belongs in the
   library modules.
+- Report range/output behavior and HTML/SVG rendering belong in `src/report.rs`; SQLite tier
+  selection, aggregation, and evidence queries belong in `src/report_storage.rs`. Report queries
+  MUST be read-only and bounded, and persisted names/resources MUST be HTML-escaped before output.
+- Generated reports MUST remain self-contained without CDN, remote fonts, or network requests.
+  Output SHOULD use a sibling temporary file plus atomic rename, and chart series SHOULD remain
+  bounded to approximately 1,200 points.
 - macOS installation paths, plist rendering, and `launchctl` calls belong in `src/service.rs`.
 - Per-database locking belongs in `src/instance.rs`; every `unsafe` libc call MUST carry a local
   safety explanation.

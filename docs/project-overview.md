@@ -14,14 +14,14 @@
 
 ### 1.1 Core Responsibilities
 
-Simple Profiler continuously samples host resource metrics, persists them locally, and will
-eventually turn selected time ranges into diagnostic reports. The implemented MVP collects CPU,
+Simple Profiler continuously samples host resource metrics, persists them locally, and turns
+selected time ranges into self-contained diagnostic reports. The implemented MVP collects CPU,
 memory, disk, network, and bounded top-process measurements, writes raw data to SQLite, and
 maintains one-minute and 15-minute metric retention tiers. It evaluates sustained CPU, memory, and
 per-mount disk-space rules, persists metric and related-process evidence across restarts, and
-exposes event and process inspection commands. On macOS
+exposes event, process, and report commands. On macOS
 it can install itself as a per-user LaunchAgent and expose service lifecycle/health commands. GPU,
-reports, and a local dashboard are planned.
+and a local dashboard are planned.
 
 ### 1.2 Relationship with Other Systems
 
@@ -32,7 +32,7 @@ vendor-specific adapters, but their exact APIs are not yet designed.
 ### 1.3 Deprecated / Retired or Not-Yet-Enabled Features
 
 - **Not yet enabled:** GPU, temperature, and power collectors.
-- **Not yet enabled:** diagnostic report generation and the dashboard.
+- **Not yet enabled:** the local dashboard.
 - **Not yet enabled:** Linux systemd, Windows Service, system-wide macOS LaunchDaemon, signed
   installer, and automatic updates.
 - No deprecated features exist in the initial version.
@@ -45,7 +45,7 @@ vendor-specific adapters, but their exact APIs are not yet designed.
 | Async runtime | Tokio 1.52.3 | Timed collection, bounded channels, shutdown signals, and the blocking storage task |
 | Host metrics | sysinfo 0.38.4 | Cross-platform CPU, memory, disk, and network access; this is the newest locked release compatible with Rust 1.92.0 |
 | Local datastore | SQLite through rusqlite 0.39.0 | A local embedded store fits a single-host profiler; rusqlite supports an explicit single-writer design |
-| CLI | Clap 4.6.1 | Defines the implemented `run`, `status`, `events`, `processes`, and `service` commands |
+| CLI | Clap 4.6.1 | Defines the implemented `run`, `status`, `events`, `processes`, `report`, and `service` commands |
 | Configuration | TOML through toml 1.1.3 and Serde | Human-readable local configuration with typed validation |
 | Logs | tracing and tracing-subscriber | Structured runtime lifecycle and collection messages |
 | macOS process control | launchd/launchctl plus libc 0.2.186 | Per-user supervision, effective-user identity, and advisory process locking |
@@ -91,7 +91,8 @@ the writer. Runtime logs can use a size-limited file writer with numbered retain
 The CLI assembles configuration and chooses an operation. `run` starts all collectors and the
 storage writer; `status` opens the same SQLite database and summarizes retention plus open anomaly
 counts; `events list/show` query recent event summaries and preserved metric/process evidence;
-`processes top` queries the latest CPU or memory ranking. Each cycle supplies
+`processes top` queries the latest CPU or memory ranking; `report generate` reads a bounded time
+range and writes an atomic, self-contained HTML artifact. Each cycle supplies
 one UTC timestamp and elapsed monotonic duration to every collector. The writer restores anomaly
 state at startup and evaluates incoming raw batches before commit. Raw rows, event transitions,
 evidence, and the next state commit in one transaction; the in-memory engine advances only after
@@ -99,6 +100,14 @@ that commit succeeds. One unavailable collector does not discard the others. Dis
 metrics and process CPU usage warm up before rate-based output. By default, fully idle I/O series
 are omitted and missing intervals
 therefore mean zero activity; disk capacity is emitted every 60 seconds.
+
+Report generation is a read-only path separate from the writer. It validates the requested range,
+prefers raw data through two hours, one-minute rollups through 24 hours, and 15-minute rollups for
+longer ranges, then falls back to the available tier when the preferred tier has no rows. SQL
+bucket grouping caps every chart series at about 1,200 points. The report combines resource trends,
+overlapping anomaly events and their preserved evidence, and top process summaries, escapes all
+stored text, renders CSS/SVG without external assets, and renames a completed temporary file into
+place atomically.
 
 ### Key Principles
 
@@ -137,6 +146,8 @@ therefore mean zero activity; disk capacity is emitted every 60 seconds.
 │   ├── main.rs            # Clap CLI and command dispatch
 │   ├── model.rs           # Normalized metric/process batch types
 │   ├── process_storage.rs # Process snapshots, retention, queries, and event attribution
+│   ├── report.rs          # Report range model, HTML/SVG rendering, and atomic output
+│   ├── report_storage.rs  # Bounded read-only report queries and tier selection
 │   ├── runtime.rs         # Timed collection and graceful shutdown
 │   ├── service.rs         # macOS LaunchAgent files and lifecycle management
 │   └── storage.rs         # SQLite schema, queries, and writer task
@@ -149,8 +160,8 @@ therefore mean zero activity; disk capacity is emitted every 60 seconds.
 └── rustfmt.toml           # Rustfmt edition and line width
 ```
 
-Future collector modules SHOULD be added below `src/collector/`. Report and dashboard directories
-are TBD — not yet designed.
+Future collector modules SHOULD be added below `src/collector/`. A separate dashboard directory is
+TBD — not yet designed.
 
 ## 5. Domain Models (High-Level)
 
@@ -171,8 +182,9 @@ AnomalyEvent     1──* AnomalyEventProcessEvidence (CPU/memory events only)
 ```
 
 The `CollectionCycle` boundary currently exists only as an in-memory `CollectionBatch`; it is not
-a database table. Device and Report remain planned diagnostic entities without schemas. See
-[domain-models.md](domain-models.md) for event lifecycle and field details.
+a database table. A report is a transient read model and generated file rather than a persisted
+entity, so schema version 4 does not add a report table. Device remains planned without a schema.
+See [domain-models.md](domain-models.md) for event lifecycle and field details.
 
 ## 6. API / Interface Structure
 
@@ -185,13 +197,16 @@ Simple Profiler has a CLI interface and no HTTP interface yet.
 | `simple-profiler events list` | List recent events newest-first, optionally only those still open | `--open`, `--limit` (1–1,000), `--database` |
 | `simple-profiler events show <ID>` | Show thresholds, time range, peak/last values, sample/gap counts, and ordered metric/process evidence | `--database` |
 | `simple-profiler processes top` | Show the latest bounded process ranking by CPU or resident memory | `--sort cpu\|memory`, `--limit` (1–100), `--database` |
+| `simple-profiler report generate` | Generate a self-contained local HTML report for a relative or explicit range | `--last`, `--from` + `--to`, `--output`, `--open`, `--database` |
 | `simple-profiler service install` | Copy the current executable, preserve/create service configuration, write the plist, load it, and start collection | none |
 | `simple-profiler service start\|stop\|restart` | Manage the installed per-user LaunchAgent; stop waits for graceful SIGTERM shutdown | none |
 | `simple-profiler service status` | Show installed/loaded/running state, PID, paths, latest sample, maintenance result, and open anomaly counts | none |
 | `simple-profiler service uninstall` | Unload the agent and remove its plist/binary while preserving user data | `--purge` also removes configuration, metrics, and logs |
 
-The global `--config <PATH>` option loads TOML settings. The local dashboard and report commands
-are TBD — not yet designed.
+The global `--config <PATH>` option loads TOML settings. `report generate` defaults to the last
+hour, accepts relative durations from one minute through 365 days or paired RFC 3339 timestamps,
+and writes under `~/Documents/SimpleProfiler Reports/` unless `--output` is provided. The local
+dashboard command is TBD — not yet designed.
 
 ## 7. Background Jobs & Scheduled Tasks
 

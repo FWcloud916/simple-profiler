@@ -1,11 +1,11 @@
 # Simple Profiler — Progress
 
-> **Last session:** 2026-07-15 · commit `3b50d19` · tests: passing (47)
+> **Last session:** 2026-07-15 · commit `60d9e89` · tests: passing (54)
 
 ## Now (WIP = 1)
 
-No feature is active. Top-process snapshots and CPU/memory event attribution are implemented;
-local HTML diagnostic reports are the next product feature.
+No feature is active. Local HTML diagnostic reports are implemented; the local dashboard is the
+next product feature.
 
 ## Feature list
 
@@ -16,7 +16,7 @@ local HTML diagnostic reports are the next product feature.
 | 3 | Enforce raw-data retention and create time rollups | `cargo test` | passing |
 | 4 | Detect sustained resource anomalies and preserve event evidence | `cargo test` | passing |
 | 5 | Record bounded top-process snapshots and attribute CPU/memory events | `cargo test` | passing |
-| 6 | Generate a local HTML diagnostic report for a selected time range | `cargo test` | not_started |
+| 6 | Generate a local HTML diagnostic report for a selected time range | `cargo test` | passing |
 | 7 | Explore metrics and events in a local dashboard | `cargo test` | not_started |
 | 8 | Collect GPU measurements through capability-aware platform adapters | `cargo test` | not_started |
 | 9 | Install and supervise the profiler as an operating-system background service | `cargo test` | passing |
@@ -77,6 +77,15 @@ local HTML diagnostic reports are the next product feature.
 - `service install` now creates a managed `~/.local/bin/simple-profiler` launcher that automatically
   uses the private service configuration; upgrades and uninstalls refuse to modify user-owned
   files at the same path. Live zsh, process-query, and service-status checks pass.
+- `report generate` now accepts relative durations or paired RFC 3339 timestamps, defaults to the
+  last hour, enforces a 365-day maximum, and atomically writes a self-contained local HTML report.
+- Report queries automatically prefer raw, one-minute, or 15-minute retained metrics by requested
+  range, fall back to available tiers, cap chart series at approximately 1,200 points, and combine
+  resource trends with anomaly/process evidence without changing schema version 4.
+- The report phase passes 54 tests, rustfmt, strict Clippy, release build, invalid/empty-range
+  checks, and live 1-hour/24-hour/7-day database smoke tests. The live 7-day report selected
+  15-minute data, contained 24 series and 28 process summaries, and was about 17 KiB with no
+  external URL or script dependency.
 
 ## Blockers
 
@@ -84,14 +93,21 @@ None.
 
 ## Next steps
 
-1. Define the local HTML report request, time-range selection, and output contract.
-2. Define report queries that choose raw, one-minute, or 15-minute data by requested range.
-3. Design report sections that combine resource summaries, anomaly timelines, and evidence.
+1. Define the local dashboard scope, navigation, and read-only security boundary.
+2. Choose the localhost server and browser-opening model while preserving one SQLite writer.
+3. Map report queries into reusable dashboard summaries and interactive time-range exploration.
 4. Inspect the first naturally occurring CPU or memory anomaly to validate its preserved process
-   evidence against the report requirements.
+   evidence in both reports and the future dashboard.
 
 ## Decision log
 
+- 2026-07-15 — Generate reports as transient, self-contained HTML artifacts with embedded CSS/SVG,
+  no JavaScript or network assets, full escaping of stored labels, and atomic file replacement.
+- 2026-07-15 — Prefer raw metrics through two hours, one-minute rollups through 24 hours, and
+  15-minute rollups for longer ranges; fall back to retained tiers and cap each chart series near
+  1,200 points.
+- 2026-07-15 — Keep reports read-only and schema-free; include at most 200 overlapping events and
+  the union of top 20 CPU/memory process summaries for ranges no longer than 365 days.
 - 2026-07-15 — Manage a shell-quoted launcher under `~/.local/bin` during service install so the
   short CLI command targets the background database; never replace or remove an unmanaged path.
 - 2026-07-15 — Wait up to five seconds for launchd to report an unloaded agent before bootstrapping

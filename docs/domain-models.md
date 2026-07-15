@@ -129,12 +129,16 @@ Copied evidence remains available after the 24-hour raw process snapshot retenti
 
 ### Report
 
-**Status: planned — no schema yet.** Will record requested diagnostic time ranges and generated
-artifacts. Format, status lifecycle, and privacy metadata are TBD — not yet designed.
+**Status: implemented as a transient read model and local HTML artifact; no schema.** A report
+contains its requested range, selected metric resolution, actual metric/process coverage, bounded
+resource series, overlapping anomaly events with preserved evidence, and bounded process
+summaries. The generated file embeds its CSS and SVG, performs no network requests, and states the
+process-data privacy boundary. Reports are not registered in SQLite and have no status lifecycle.
 
 ## 2. Entity Relationships
 
-Solid relationships are implemented; dotted descriptions are planned only.
+Persistent relationships are shown below. Report content is assembled by bounded read-only queries
+and does not add foreign keys.
 
 ```text
 CollectionCycle (transient) 1──* MetricSample
@@ -144,9 +148,9 @@ MaintenanceState ── stores ──► one-minute and 15-minute watermark keys
 AnomalyRuleState 0..1──0..1 Event
 Event 1──* AnomalyEventEvidence
 Event 1──* AnomalyEventProcessEvidence (CPU/memory events only)
+Report (transient) ── reads ──► MetricSample or MetricRollup, Event, ProcessSample
 
 Device 1··* MetricSample     (planned — no schema yet)
-Report 1··* Event            (planned — no schema yet)
 ```
 
 The schema does not persist a collection-cycle ID, device ID, report ID, or SQL foreign-key
@@ -250,7 +254,27 @@ then the newest eligible prelude rows until the per-event cap is reached. Escala
 recovery checkpoints use the latest fresh snapshot. Disk-space events intentionally receive no
 process attribution because the collected process dimensions do not identify filesystem usage.
 
-## 6. Metric Naming
+## 6. Report Generation Flow
+
+1. `report generate` resolves either `--last` or paired RFC 3339 `--from`/`--to` values. It
+   defaults to the last hour and rejects empty, reversed, conflicting, or over-365-day ranges.
+2. The reader prefers raw rows for ranges up to two hours, one-minute rollups for ranges up to 24
+   hours, and 15-minute rollups for longer ranges, falling back to another retained tier when the
+   preferred tier has no rows.
+3. A fixed metric whitelist selects total CPU usage, memory usage, per-mount disk-space usage,
+   disk read/write rates, and network receive/transmit rates. SQL time buckets cap each series at
+   approximately 1,200 points while preserving weighted averages and observed minima/maxima.
+4. The reader adds at most 200 overlapping anomaly events with their bounded stored evidence, plus
+   the union of the top 20 CPU and top 20 memory process summaries grouped by PID and start time.
+5. The renderer escapes all persisted labels and names, embeds CSS and SVG without JavaScript or
+   external assets, and writes the completed document using a temporary sibling plus atomic rename.
+6. Output defaults to `~/Documents/SimpleProfiler Reports/`; `--output` selects another file and
+   the opt-in `--open` flag invokes the local macOS viewer after the write succeeds.
+
+Report generation is read-only and does not change schema version 4, retention watermarks, anomaly
+state, or the running background collector.
+
+## 7. Metric Naming
 
 The implemented names are:
 
@@ -276,7 +300,7 @@ The implemented names are:
 New collectors SHOULD follow dot-separated, stable names and MUST attach an explicit unit. A
 registry for validating names and units is TBD — not yet designed.
 
-## 7. Failure Behavior
+## 8. Failure Behavior
 
 - Invalid sampling/retention values, interval, channel capacity, retention-tier ordering, process
   ranking limits, or event-evidence caps are rejected before the runtime starts.
@@ -292,6 +316,10 @@ registry for validating names and units is TBD — not yet designed.
   and zero maximum gaps are rejected during configuration validation.
 - Rollup rows, cleanup, and watermarks commit in one transaction; a failed maintenance pass does
   not expose a partially advanced watermark.
+- Report ranges larger than 365 days or invalid/conflicting time options are rejected before query;
+  a valid range with no retained data still produces an explicit empty-state report.
+- Report output uses a temporary file and rename so a render/write failure does not expose a
+  partially written destination.
 - `service stop` sends SIGTERM and fails if the process does not report stopped within 20 seconds.
 - `launchctl` failures include stderr context instead of being reported as successful lifecycle
   changes.
@@ -299,18 +327,19 @@ registry for validating names and units is TBD — not yet designed.
 Per-collector health state, explicit missing-sample markers, and collector-failure event rules are
 planned — no schema yet.
 
-## 8. Deprecated Components
+## 9. Deprecated Components
 
 N/A — the initial version has no deprecated domain components.
 
-## 9. Developer Tooling / Maintenance Scripts
+## 10. Developer Tooling / Maintenance Scripts
 
 No separate domain maintenance scripts exist. The writer performs rollup and retention maintenance
 internally. The `status` command shows raw/rollup ranges, storage sizes, watermarks, maintenance,
 and open-event counts. `events list` lists recent or open events and `events show` renders one
 event's thresholds, measurements, counts, metric evidence, and related-process evidence.
-`processes top` renders the latest CPU or resident-memory ranking. On macOS, the `service` command
-group implements this lifecycle:
+`processes top` renders the latest CPU or resident-memory ranking. `report generate` performs an
+on-demand read-only query and writes the selected range as local HTML; it is not scheduled. On
+macOS, the `service` command group implements this lifecycle:
 
 ```text
 uninstalled ── install ──► loaded/running

@@ -21,10 +21,13 @@ A local-first Rust service that continuously records system metrics for later di
   days by default; closed anomaly events are retained for 365 days by default.
 - Reports schema version, row counts and time ranges by resolution, database/WAL size, rollup
   watermarks, maintenance status, and open anomaly counts from the command line.
+- Generates a self-contained local HTML diagnostic report for relative or explicit time ranges,
+  automatically selecting raw, one-minute, or 15-minute data and including anomaly/process
+  evidence without external scripts, fonts, or network requests.
 - Installs and supervises itself as a per-user macOS LaunchAgent, with graceful shutdown,
   single-instance protection, service health output, and bounded log rotation.
 
-GPU collection, diagnostic reports, and the dashboard are planned but are not implemented yet.
+GPU collection and the dashboard are planned but are not implemented yet.
 
 ## Quickstart
 
@@ -91,6 +94,22 @@ processes. Raw process snapshots default to 24-hour retention. CPU and memory ev
 copied into the event record and remains available after those snapshots expire. Executable paths
 are disabled by default; command lines, environment variables, and working directories are never
 collected.
+
+### Generate a diagnostic report
+
+Generate a local report for the last hour, or choose an explicit RFC 3339 time range:
+
+```bash
+cargo run -- report generate --last 1h
+cargo run -- report generate \
+  --from 2026-07-15T08:00:00+08:00 \
+  --to 2026-07-15T12:00:00+08:00 \
+  --output /tmp/simple-profiler-report.html
+```
+
+`--last` accepts minutes, hours, or days such as `30m`, `6h`, and `7d`. The maximum range is 365
+days. Reports default to `~/Documents/SimpleProfiler Reports/`; add `--open` to open the completed
+file on macOS. The generated HTML is self-contained and can be viewed offline.
 
 ### Run in the background on macOS
 
