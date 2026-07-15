@@ -21,7 +21,7 @@ maintains one-minute and 15-minute metric retention tiers. It evaluates sustaine
 per-mount disk-space rules, persists metric and related-process evidence across restarts, and
 exposes event, process, and report commands. On macOS
 it can install itself as a per-user LaunchAgent and expose service lifecycle/health commands. GPU,
-and a local dashboard are planned.
+collection remains planned; an on-demand local dashboard is implemented.
 
 ### 1.2 Relationship with Other Systems
 
@@ -32,7 +32,6 @@ vendor-specific adapters, but their exact APIs are not yet designed.
 ### 1.3 Deprecated / Retired or Not-Yet-Enabled Features
 
 - **Not yet enabled:** GPU, temperature, and power collectors.
-- **Not yet enabled:** the local dashboard.
 - **Not yet enabled:** Linux systemd, Windows Service, system-wide macOS LaunchDaemon, signed
   installer, and automatic updates.
 - No deprecated features exist in the initial version.
@@ -43,9 +42,11 @@ vendor-specific adapters, but their exact APIs are not yet designed.
 |---|---|---|
 | Language | Rust 1.92.0, edition 2024 | Selected by the user for predictable resource use and low-level system access; pinned as the MSRV in [`../clippy.toml`](../clippy.toml) |
 | Async runtime | Tokio 1.52.3 | Timed collection, bounded channels, shutdown signals, and the blocking storage task |
+| Local HTTP | Axum 0.8.9 | Loopback-only dashboard routing, JSON responses, middleware, and graceful shutdown |
 | Host metrics | sysinfo 0.38.4 | Cross-platform CPU, memory, disk, and network access; this is the newest locked release compatible with Rust 1.92.0 |
 | Local datastore | SQLite through rusqlite 0.39.0 | A local embedded store fits a single-host profiler; rusqlite supports an explicit single-writer design |
-| CLI | Clap 4.6.1 | Defines the implemented `run`, `status`, `events`, `processes`, `report`, and `service` commands |
+| CLI | Clap 4.6.1 | Defines the implemented `run`, `status`, `events`, `processes`, `report`, `dashboard`, and `service` commands |
+| Dashboard UI | Embedded HTML/CSS/JavaScript/SVG | Keeps the local dashboard in one executable without Node, CDN, remote fonts, or runtime asset downloads |
 | Configuration | TOML through toml 1.1.3 and Serde | Human-readable local configuration with typed validation |
 | Logs | tracing and tracing-subscriber | Structured runtime lifecycle and collection messages |
 | macOS process control | launchd/launchctl plus libc 0.2.186 | Per-user supervision, effective-user identity, and advisory process locking |
@@ -80,6 +81,8 @@ Tokio interval ──► shared CollectionContext
                          ├── raw rows   ├── anomaly engine/state/evidence
                          ├── process snapshots and event attribution
                          │              └── 1m / 15m rollups
+
+Browser ── tokenized loopback HTTP ──► Dashboard API ── read-only SQLite connections
 ```
 
 On macOS, `launchd` starts the installed executable with its private configuration. Before opening
@@ -92,7 +95,8 @@ The CLI assembles configuration and chooses an operation. `run` starts all colle
 storage writer; `status` opens the same SQLite database and summarizes retention plus open anomaly
 counts; `events list/show` query recent event summaries and preserved metric/process evidence;
 `processes top` queries the latest CPU or memory ranking; `report generate` reads a bounded time
-range and writes an atomic, self-contained HTML artifact. Each cycle supplies
+range and writes an atomic, self-contained HTML artifact; `dashboard` serves the same bounded
+summary queries on an ephemeral loopback port until Ctrl-C or SIGTERM. Each cycle supplies
 one UTC timestamp and elapsed monotonic duration to every collector. The writer restores anomaly
 state at startup and evaluates incoming raw batches before commit. Raw rows, event transitions,
 evidence, and the next state commit in one transaction; the in-memory engine advances only after
@@ -109,6 +113,13 @@ overlapping anomaly events and their preserved evidence, and top process summari
 stored text, renders CSS/SVG without external assets, and renames a completed temporary file into
 place atomically.
 
+The dashboard is a separate, read-only foreground process. It binds only `127.0.0.1`, chooses an
+available port by default, creates a random 128-bit session token in the URL, rejects a mismatched
+Host header, caps concurrent queries at four, and applies no-store, Content Security Policy,
+frame-denial, referrer, and content-type headers. Every request opens a short-lived SQLite
+read-only connection on a blocking task, so it neither migrates the schema nor participates in the
+single-writer path. HTML, CSS, and JavaScript assets are compiled into the Rust executable.
+
 ### Key Principles
 
 - Collectors MUST only collect and normalize measurements; they do not write storage directly.
@@ -118,6 +129,8 @@ place atomically.
   work MUST stay on that same writer task.
 - Only one profiler process may own a database's instance lock at a time.
 - Blocking database work runs outside Tokio's asynchronous worker threads.
+- Dashboard requests MUST remain read-only, loopback-only, token-scoped, bounded by range/point/
+  event/process limits, and isolated from the collection writer.
 - A collector failure SHOULD be isolated and logged without corrupting already stored data.
 - Implemented and planned capabilities MUST be labeled separately.
 - Installing or removing a LaunchAgent changes user service state and MUST require explicit user
@@ -140,6 +153,8 @@ place atomically.
 │   ├── anomaly.rs         # Sustained-threshold state machine
 │   ├── anomaly_storage.rs # Event/state/evidence persistence and queries
 │   ├── config.rs          # TOML model, defaults, and validation
+│   ├── dashboard/         # Embedded HTML, CSS, and JavaScript dashboard assets
+│   ├── dashboard.rs       # Loopback server, session security, JSON API, and query limits
 │   ├── instance.rs        # Per-database process lock
 │   ├── lib.rs             # Library module exports
 │   ├── logging.rs         # Console or size-rotated file logging
@@ -160,8 +175,7 @@ place atomically.
 └── rustfmt.toml           # Rustfmt edition and line width
 ```
 
-Future collector modules SHOULD be added below `src/collector/`. A separate dashboard directory is
-TBD — not yet designed.
+Future collector modules SHOULD be added below `src/collector/`.
 
 ## 5. Domain Models (High-Level)
 
@@ -183,12 +197,14 @@ AnomalyEvent     1──* AnomalyEventProcessEvidence (CPU/memory events only)
 
 The `CollectionCycle` boundary currently exists only as an in-memory `CollectionBatch`; it is not
 a database table. A report is a transient read model and generated file rather than a persisted
-entity, so schema version 4 does not add a report table. Device remains planned without a schema.
+entity; a dashboard snapshot is another transient view over the same bounded series, event
+summaries, process summaries, and storage status. Schema version 4 adds neither a report nor a
+dashboard table. Device remains planned without a schema.
 See [domain-models.md](domain-models.md) for event lifecycle and field details.
 
 ## 6. API / Interface Structure
 
-Simple Profiler has a CLI interface and no HTTP interface yet.
+Simple Profiler has a CLI plus a token-scoped, loopback-only HTTP interface while `dashboard` runs.
 
 | Command | Purpose | Important options |
 |---|---|---|
@@ -198,15 +214,18 @@ Simple Profiler has a CLI interface and no HTTP interface yet.
 | `simple-profiler events show <ID>` | Show thresholds, time range, peak/last values, sample/gap counts, and ordered metric/process evidence | `--database` |
 | `simple-profiler processes top` | Show the latest bounded process ranking by CPU or resident memory | `--sort cpu\|memory`, `--limit` (1–100), `--database` |
 | `simple-profiler report generate` | Generate a self-contained local HTML report for a relative or explicit range | `--last`, `--from` + `--to`, `--output`, `--open`, `--database` |
+| `simple-profiler dashboard` | Serve the read-only dashboard until interrupted | `--port` (0 chooses an available port), `--open`, `--database` |
 | `simple-profiler service install` | Copy the current executable, preserve/create service configuration, write the plist, load it, and start collection | none |
 | `simple-profiler service start\|stop\|restart` | Manage the installed per-user LaunchAgent; stop waits for graceful SIGTERM shutdown | none |
 | `simple-profiler service status` | Show installed/loaded/running state, PID, paths, latest sample, maintenance result, and open anomaly counts | none |
 | `simple-profiler service uninstall` | Unload the agent and remove its plist/binary while preserving user data | `--purge` also removes configuration, metrics, and logs |
 
-The global `--config <PATH>` option loads TOML settings. `report generate` defaults to the last
+The dashboard exposes only `GET` routes under its random `/session/<TOKEN>/` prefix: the embedded
+page/assets, `/api/v1/status`, `/api/v1/snapshot`, and `/api/v1/events/<ID>`. It does not send CORS
+headers or expose mutation routes. The global `--config <PATH>` option loads TOML settings.
+`report generate` defaults to the last
 hour, accepts relative durations from one minute through 365 days or paired RFC 3339 timestamps,
-and writes under `~/Documents/SimpleProfiler Reports/` unless `--output` is provided. The local
-dashboard command is TBD — not yet designed.
+and writes under `~/Documents/SimpleProfiler Reports/` unless `--output` is provided.
 
 ## 7. Background Jobs & Scheduled Tasks
 
@@ -221,6 +240,7 @@ dashboard command is TBD — not yet designed.
 | Storage maintenance | Checked by the writer after inserts; every 60 seconds by default | Roll up at most 60 complete buckets per tier, apply metric and closed-event retention in bounded chunks, then request a passive WAL checkpoint |
 | macOS LaunchAgent supervision | Login load and abnormal exit | Start the installed `run` command and restart after unsuccessful exit, throttled to at most one launch per 10 seconds |
 | Log rotation | Before a write would exceed the configured size | Rename numbered files and retain five rotated 10 MiB files plus the current file by default |
+| Dashboard refresh | Browser request; every 15 seconds by default | Open one bounded read-only connection per API request and return JSON without changing collection state |
 | Graceful shutdown | Ctrl-C, SIGTERM, or `--samples` limit | Close the channel, drain queued batches, then stop |
 
 Maintenance waits 30 seconds before considering a bucket complete. Raw deletion cannot pass the
@@ -234,9 +254,10 @@ recovery. Scheduled report generation is TBD — not yet designed.
 The implemented runtime has no external network integration. `sysinfo` is the in-process platform
 abstraction for CPU, memory, disk, and network data, and bundled SQLite is compiled with the
 application. On macOS, service commands invoke the local `/bin/launchctl` process and read its
-status output. Anomaly detection reads only local metric batches and configuration; it makes no
-notification or network call. Future NVIDIA, AMD, and Apple GPU adapter choices are TBD — not yet
-designed.
+status output. The optional dashboard accepts HTTP only from its exact `127.0.0.1` origin and does
+not load or call remote services. Anomaly detection reads only local metric batches and
+configuration; it makes no notification or external network call. Future NVIDIA, AMD, and Apple
+GPU adapter choices are TBD — not yet designed.
 
 ## 9. Database / Data Stores
 
@@ -271,7 +292,9 @@ rows for 24 hours, process snapshots for 24 hours, one-minute rows for 30 days, 
 samples expire. Closed-event cleanup deletes metric/process evidence and events in 1,000-event
 chunks by default; open events are retained. Cleanup
 leaves reusable SQLite pages and does not run automatic `VACUUM`. Because this is an embedded local
-store, the server-database observation module does not apply.
+store, the server-database observation module does not apply. Dashboard API handlers open the
+current schema with SQLite read-only flags and reject older/newer versions rather than migrating
+them; dashboard reads do not alter WAL, watermarks, or retained data.
 
 ## 10. Environments & Deployment
 
@@ -303,6 +326,9 @@ the same path causes installation to stop safely. `~/.local/bin` must already be
 uninstall preserves configuration, metrics, and logs; `--purge` is the explicit destructive
 variant. The agent starts on login, restarts only after unsuccessful exit, allows 20 seconds for
 shutdown, and runs as the current user rather than as a system LaunchDaemon.
+Once an installed binary includes the dashboard release, the same managed launcher can start the
+on-demand foreground dashboard against the background database. The LaunchAgent itself continues
+running only the collector and does not expose a persistent HTTP listener.
 
 ### Configuration Hierarchy
 

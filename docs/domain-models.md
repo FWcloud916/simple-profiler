@@ -135,6 +135,13 @@ resource series, overlapping anomaly events with preserved evidence, and bounded
 summaries. The generated file embeds its CSS and SVG, performs no network requests, and states the
 process-data privacy boundary. Reports are not registered in SQLite and have no status lifecycle.
 
+### DashboardSnapshot
+
+**Status: implemented as a transient JSON read model; no schema.** A snapshot shares report range,
+resolution, bounded resource series, coverage, event summaries, and process summaries, but loads
+full metric/process evidence only when a user selects one event. `StorageStatus` is fetched
+separately so live storage health does not enlarge every chart response.
+
 ## 2. Entity Relationships
 
 Persistent relationships are shown below. Report content is assembled by bounded read-only queries
@@ -149,6 +156,7 @@ AnomalyRuleState 0..1──0..1 Event
 Event 1──* AnomalyEventEvidence
 Event 1──* AnomalyEventProcessEvidence (CPU/memory events only)
 Report (transient) ── reads ──► MetricSample or MetricRollup, Event, ProcessSample
+DashboardSnapshot (transient) ── reads ──► MetricSample or MetricRollup, Event, ProcessSample
 
 Device 1··* MetricSample     (planned — no schema yet)
 ```
@@ -274,7 +282,28 @@ process attribution because the collected process dimensions do not identify fil
 Report generation is read-only and does not change schema version 4, retention watermarks, anomaly
 state, or the running background collector.
 
-## 7. Metric Naming
+## 7. Dashboard Query Flow
+
+1. `dashboard` verifies that the selected database already uses schema version 4, generates a
+   random 128-bit session token, and binds an available `127.0.0.1` port by default.
+2. Requests must carry the generated token in their path and the exact loopback Host value. Only
+   versioned `GET` APIs exist; responses disable caching, framing, referrer forwarding, and remote
+   scripts/styles/connections through security headers.
+3. Each API request reserves one of four query slots, opens a short-lived SQLite connection with
+   read-only flags inside `spawn_blocking`, performs a bounded query, and closes that connection.
+4. `/api/v1/snapshot` uses the report range resolver, resolution fallback, fixed metric whitelist,
+   approximately 1,200 points per series, 200 event-summary limit, and top-20 CPU/memory process
+   union. `/api/v1/events/<ID>` loads preserved evidence only for the selected event.
+5. The embedded browser client renders light/dark resource charts with min/max bands and explicit
+   gaps, anomaly drill-down, storage health, and sortable process summaries. It refreshes every 15
+   seconds by default and uses no remote assets or telemetry.
+6. Ctrl-C or SIGTERM gracefully stops only the dashboard listener. The separately installed
+   background collector and its single writer continue uninterrupted.
+
+The server rejects invalid/over-365-day ranges with HTTP 400, excess concurrent queries with 503,
+unknown sessions/events with 404, and a mismatched Host value with 403.
+
+## 8. Metric Naming
 
 The implemented names are:
 
@@ -300,7 +329,7 @@ The implemented names are:
 New collectors SHOULD follow dot-separated, stable names and MUST attach an explicit unit. A
 registry for validating names and units is TBD — not yet designed.
 
-## 8. Failure Behavior
+## 9. Failure Behavior
 
 - Invalid sampling/retention values, interval, channel capacity, retention-tier ordering, process
   ranking limits, or event-evidence caps are rejected before the runtime starts.
@@ -320,6 +349,10 @@ registry for validating names and units is TBD — not yet designed.
   a valid range with no retained data still produces an explicit empty-state report.
 - Report output uses a temporary file and rename so a render/write failure does not expose a
   partially written destination.
+- Dashboard startup rejects a missing or non-current database without creating/migrating it, never
+  binds outside IPv4 loopback, and creates a new session URL on every launch.
+- Dashboard queries run off Tokio worker threads with a four-query admission limit; an API error
+  does not affect the collector or SQLite writer.
 - `service stop` sends SIGTERM and fails if the process does not report stopped within 20 seconds.
 - `launchctl` failures include stderr context instead of being reported as successful lifecycle
   changes.
@@ -327,18 +360,19 @@ registry for validating names and units is TBD — not yet designed.
 Per-collector health state, explicit missing-sample markers, and collector-failure event rules are
 planned — no schema yet.
 
-## 9. Deprecated Components
+## 10. Deprecated Components
 
 N/A — the initial version has no deprecated domain components.
 
-## 10. Developer Tooling / Maintenance Scripts
+## 11. Developer Tooling / Maintenance Scripts
 
 No separate domain maintenance scripts exist. The writer performs rollup and retention maintenance
 internally. The `status` command shows raw/rollup ranges, storage sizes, watermarks, maintenance,
 and open-event counts. `events list` lists recent or open events and `events show` renders one
 event's thresholds, measurements, counts, metric evidence, and related-process evidence.
 `processes top` renders the latest CPU or resident-memory ranking. `report generate` performs an
-on-demand read-only query and writes the selected range as local HTML; it is not scheduled. On
+on-demand read-only query and writes the selected range as local HTML; `dashboard` serves bounded
+read-only JSON queries and compiled-in assets until interrupted. Neither is scheduled. On
 macOS, the `service` command group implements this lifecycle:
 
 ```text

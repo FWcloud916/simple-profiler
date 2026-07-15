@@ -1,11 +1,11 @@
 # Simple Profiler — Progress
 
-> **Last session:** 2026-07-15 · commit `60d9e89` · tests: passing (54)
+> **Last session:** 2026-07-15 · commit `4976f40` · tests: passing (59)
 
 ## Now (WIP = 1)
 
-No feature is active. Local HTML diagnostic reports are implemented; the local dashboard is the
-next product feature.
+No feature is active. The local read-only dashboard is implemented; capability-aware GPU
+collection is the next product feature.
 
 ## Feature list
 
@@ -17,7 +17,7 @@ next product feature.
 | 4 | Detect sustained resource anomalies and preserve event evidence | `cargo test` | passing |
 | 5 | Record bounded top-process snapshots and attribute CPU/memory events | `cargo test` | passing |
 | 6 | Generate a local HTML diagnostic report for a selected time range | `cargo test` | passing |
-| 7 | Explore metrics and events in a local dashboard | `cargo test` | not_started |
+| 7 | Explore metrics and events in a local dashboard | `cargo test` | passing |
 | 8 | Collect GPU measurements through capability-aware platform adapters | `cargo test` | not_started |
 | 9 | Install and supervise the profiler as an operating-system background service | `cargo test` | passing |
 
@@ -86,6 +86,19 @@ next product feature.
   checks, and live 1-hour/24-hour/7-day database smoke tests. The live 7-day report selected
   15-minute data, contained 24 series and 28 process summaries, and was about 17 KiB with no
   external URL or script dependency.
+- `dashboard` now serves an on-demand local interface from an ephemeral `127.0.0.1` port using a
+  random 128-bit path token, exact Host validation, four-query admission control, strict security
+  headers, and compiled-in HTML/CSS/JavaScript assets with no external dependency.
+- Dashboard requests open short-lived schema-v4 SQLite read-only connections on blocking tasks,
+  reuse the report range/resolution/point limits, load event detail on demand, and cannot migrate
+  or modify the collector database. Ctrl-C/SIGTERM stops only the dashboard.
+- The dashboard implements system-theme light/dark layouts, 15m–30d presets plus custom ranges,
+  min/average/max charts with explicit gaps, live storage health, anomaly evidence drill-down,
+  sortable process summaries, empty/error states, and optional 15-second refresh.
+- The dashboard phase passes 59 tests, rustfmt, strict Clippy, release build, JavaScript syntax,
+  invalid range and hostile Host checks, security-header checks, and live 1h/24h/7d API smoke
+  tests. Live responses selected raw/1m/15m tiers in 5–26 ms, stayed below 1 MiB, and background
+  sample timestamps continued advancing during dashboard queries.
 
 ## Blockers
 
@@ -93,14 +106,22 @@ None.
 
 ## Next steps
 
-1. Define the local dashboard scope, navigation, and read-only security boundary.
-2. Choose the localhost server and browser-opening model while preserving one SQLite writer.
-3. Map report queries into reusable dashboard summaries and interactive time-range exploration.
+1. Inventory Apple, NVIDIA, and AMD GPU capability probes available without privileged access.
+2. Define stable GPU metric names, units, device identity, and unavailable/error semantics.
+3. Implement the macOS Apple GPU adapter first behind a capability-aware collector contract.
 4. Inspect the first naturally occurring CPU or memory anomaly to validate its preserved process
-   evidence in both reports and the future dashboard.
+   evidence in reports and the dashboard.
 
 ## Decision log
 
+- 2026-07-15 — Serve the dashboard only on `127.0.0.1` with an ephemeral port, random 128-bit
+  session path, exact Host validation, no mutation routes/CORS, strict response headers, and at
+  most four concurrent blocking queries.
+- 2026-07-15 — Keep dashboard assets in the Rust executable with system light/dark themes and no
+  Node runtime, CDN, remote fonts, telemetry, or persistent HTTP listener in the LaunchAgent.
+- 2026-07-15 — Open one short-lived SQLite read-only connection per API request and reject
+  non-current schemas rather than migrating; reuse report ranges/tiers/bounds and fetch full event
+  evidence only on selection.
 - 2026-07-15 — Generate reports as transient, self-contained HTML artifacts with embedded CSS/SVG,
   no JavaScript or network assets, full escaping of stored labels, and atomic file replacement.
 - 2026-07-15 — Prefer raw metrics through two hours, one-minute rollups through 24 hours, and

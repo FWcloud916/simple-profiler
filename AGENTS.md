@@ -13,6 +13,8 @@ Simple Profiler owns local collection and diagnostic storage of host resource me
 - MUST update `PROGRESS.md` at clock-out (source: selected agent-harness workflow).
 - MUST NOT install, unload, uninstall, or purge the macOS LaunchAgent without explicit user
   approval (source: `docs/project-overview.md` §10).
+- MUST keep the dashboard loopback-only, token-scoped, read-only, and query-bounded (source:
+  `docs/project-overview.md` §3).
 
 ## Read before you work
 
@@ -35,6 +37,7 @@ cargo run -- events list
 cargo run -- events show 1
 cargo run -- processes top --sort cpu
 cargo run -- report generate --last 1h
+cargo run -- dashboard
 target/release/simple-profiler service status
 cargo test
 cargo fmt --check
@@ -60,6 +63,9 @@ cargo clippy --all-targets --all-features -- -D warnings
   `src/process_storage.rs` and remain owned by the single writer transaction.
 - Report time-range parsing and HTML rendering live in `src/report.rs`; bounded, read-only report
   queries and retention-tier selection live in `src/report_storage.rs`.
+- Dashboard loopback serving, session authorization, security headers, and API handlers live in
+  `src/dashboard.rs`; embedded HTML/CSS/JavaScript live under `src/dashboard/` and follow
+  `DESIGN.md`.
 - Implemented and planned behavior MUST be labeled separately in documentation.
 
 ## Docs maintenance

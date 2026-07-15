@@ -51,8 +51,10 @@ environment values inside collectors.
 [`../src/main.rs`](../src/main.rs), [`../src/runtime.rs`](../src/runtime.rs), and
 [`../src/storage.rs`](../src/storage.rs) use `anyhow::Context` when propagating application-level
 failures. [`../src/service.rs`](../src/service.rs) also includes failed path or `launchctl` stderr
-context at the operating-system boundary. New collector failure categories SHOULD be added to
-`CollectorError`; operational context SHOULD be attached at the caller boundary.
+context at the operating-system boundary. [`../src/dashboard.rs`](../src/dashboard.rs) converts
+expected client errors into bounded JSON/status responses while preserving internal error context.
+New collector failure categories SHOULD be added to `CollectorError`; operational context SHOULD
+be attached at the caller boundary.
 
 ### Blocking storage isolation
 
@@ -120,6 +122,15 @@ Documentation MUST distinguish implemented behavior from `planned — no schema 
 - Generated reports MUST remain self-contained without CDN, remote fonts, or network requests.
   Output SHOULD use a sibling temporary file plus atomic rename, and chart series SHOULD remain
   bounded to approximately 1,200 points.
+- Dashboard serving, admission limits, session authorization, security headers, and API handlers
+  belong in `src/dashboard.rs`; its embedded HTML/CSS/JavaScript belong under `src/dashboard/` and
+  MUST follow `DESIGN.md`.
+- Dashboard listeners MUST bind only IPv4 loopback, use a fresh random session token, reject the
+  wrong Host value, expose only read operations, and open SQLite with read-only flags inside
+  `spawn_blocking`. Stored process/resource labels MUST enter the DOM through text nodes rather
+  than HTML interpolation.
+- Dashboard assets MUST remain compiled into the executable with no remote dependency. API ranges,
+  points, event/process rows, and concurrent blocking queries MUST remain bounded.
 - macOS installation paths, plist rendering, and `launchctl` calls belong in `src/service.rs`.
 - Per-database locking belongs in `src/instance.rs`; every `unsafe` libc call MUST carry a local
   safety explanation.

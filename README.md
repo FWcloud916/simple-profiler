@@ -24,10 +24,13 @@ A local-first Rust service that continuously records system metrics for later di
 - Generates a self-contained local HTML diagnostic report for relative or explicit time ranges,
   automatically selecting raw, one-minute, or 15-minute data and including anomaly/process
   evidence without external scripts, fonts, or network requests.
+- Serves an on-demand, read-only dashboard on a random loopback port with a per-launch session
+  token, embedded assets, bounded live queries, time-range controls, charts, anomaly evidence, and
+  sortable top-process summaries.
 - Installs and supervises itself as a per-user macOS LaunchAgent, with graceful shutdown,
   single-instance protection, service health output, and bounded log rotation.
 
-GPU collection and the dashboard are planned but are not implemented yet.
+GPU collection is planned but is not implemented yet.
 
 ## Quickstart
 
@@ -111,6 +114,19 @@ cargo run -- report generate \
 days. Reports default to `~/Documents/SimpleProfiler Reports/`; add `--open` to open the completed
 file on macOS. The generated HTML is self-contained and can be viewed offline.
 
+### Explore the local dashboard
+
+Start the read-only dashboard on an available loopback port and open it in the default browser:
+
+```bash
+cargo run -- dashboard --open
+```
+
+Without `--open`, the command prints its session URL. The dashboard process remains in the
+foreground until Ctrl-C or SIGTERM, while the installed background collector continues normally.
+It never listens beyond `127.0.0.1`, and each launch uses a new unguessable URL token. Presets cover
+15 minutes through 30 days; custom ranges support up to 365 days.
+
 ### Run in the background on macOS
 
 Build an optimized binary, then explicitly install and start the per-user LaunchAgent:
@@ -154,7 +170,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 ```text
 config/        Example runtime configuration
 docs/          Architecture and development references
-src/           CLI, collectors, runtime coordination, models, and SQLite storage
+src/           CLI, collectors, dashboard assets/server, runtime coordination, models, and storage
 Cargo.toml     Rust package and dependency manifest
 PROGRESS.md    Cross-session implementation state
 DESIGN.md      Planned dashboard design contract
@@ -167,4 +183,4 @@ DESIGN.md      Planned dashboard design contract
 | [docs/project-overview.md](docs/project-overview.md) | Architecture, directory map, interfaces, storage, and deployment |
 | [docs/domain-models.md](docs/domain-models.md) | Metric, anomaly-event, evidence, and storage mechanisms |
 | [docs/coding-style.md](docs/coding-style.md) | Rust formatting, linting, and project conventions |
-| [DESIGN.md](DESIGN.md) | Planned dashboard design tokens and visual rules |
+| [DESIGN.md](DESIGN.md) | Dashboard design tokens, responsive behavior, and visual rules |
