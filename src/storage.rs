@@ -7,7 +7,8 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
+use serde::Serialize;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::warn;
 
@@ -17,7 +18,7 @@ use crate::{
     config::{AnomalyConfig, ProcessConfig, RetentionConfig},
     model::{CollectionBatch, MetricBatch},
     process_storage,
-    report::{ReportData, ReportRange},
+    report::{DashboardSnapshot, ReportData, ReportRange},
     report_storage,
 };
 
@@ -181,14 +182,14 @@ pub struct Storage {
     path: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DatasetStatus {
     pub row_count: i64,
     pub oldest_ms: Option<i64>,
     pub newest_ms: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StorageStatus {
     pub schema_version: i64,
     pub raw: DatasetStatus,
@@ -226,6 +227,30 @@ impl Storage {
             connection.pragma_update(None, "journal_mode", "WAL")?;
         }
         migrate(&mut connection)?;
+        Ok(Self {
+            connection,
+            path: path.to_path_buf(),
+        })
+    }
+
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .with_context(|| {
+            format!(
+                "failed to open SQLite database read-only {}",
+                path.display()
+            )
+        })?;
+        connection.pragma_update(None, "busy_timeout", 5_000_i64)?;
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version != CURRENT_SCHEMA_VERSION {
+            bail!(
+                "dashboard requires schema version {CURRENT_SCHEMA_VERSION}, but the database is version {version}; run a current write-capable command first"
+            );
+        }
         Ok(Self {
             connection,
             path: path.to_path_buf(),
@@ -381,6 +406,10 @@ impl Storage {
 
     pub fn report(&self, range: ReportRange) -> Result<ReportData> {
         report_storage::load_report(&self.connection, range)
+    }
+
+    pub fn dashboard_snapshot(&self, range: ReportRange) -> Result<DashboardSnapshot> {
+        report_storage::load_dashboard_snapshot(&self.connection, range)
     }
 
     pub fn status(&self) -> Result<StorageStatus> {
@@ -1582,6 +1611,52 @@ mod tests {
 
         assert_eq!(storage.status().expect("status").raw.row_count, 0);
         assert_eq!(storage.status().expect("status").minute.row_count, 1);
+    }
+
+    #[test]
+    fn dashboard_opens_a_current_database_read_only() {
+        let directory = tempdir().expect("temp dir");
+        let path = directory.path().join("dashboard.sqlite3");
+        let mut storage = Storage::open(&path).expect("open storage");
+        storage
+            .insert_batch(&vec![Metric::new(
+                at(10_000),
+                "system",
+                "cpu.total.usage",
+                42.0,
+                "percent",
+            )])
+            .expect("sample");
+        drop(storage);
+
+        let read_only = Storage::open_read_only(&path).expect("read-only storage");
+        let snapshot = read_only
+            .dashboard_snapshot(ReportRange::new(0, 20_000).expect("range"))
+            .expect("dashboard snapshot");
+
+        assert_eq!(snapshot.series.len(), 1);
+        assert_eq!(snapshot.series[0].average_value, 42.0);
+        assert_eq!(read_only.status().expect("status").schema_version, 4);
+    }
+
+    #[test]
+    fn dashboard_does_not_migrate_an_old_database() {
+        let directory = tempdir().expect("temp dir");
+        let path = directory.path().join("old.sqlite3");
+        let old = Connection::open(&path).expect("old database");
+        old.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION - 1)
+            .expect("old version");
+        drop(old);
+
+        let error = Storage::open_read_only(&path)
+            .err()
+            .expect("old schema is rejected");
+        assert!(error.to_string().contains("requires schema version"));
+        let unchanged: i64 = Connection::open(&path)
+            .expect("reopen old database")
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("version");
+        assert_eq!(unchanged, CURRENT_SCHEMA_VERSION - 1);
     }
 
     #[test]

@@ -4,11 +4,8 @@ use anyhow::Result;
 use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
 use simple_profiler::{
-    AppConfig, logging,
-    report::{
-        ReportRange, default_output_path, open_report, parse_relative_duration,
-        parse_rfc3339_millis, render_html, write_html_atomically,
-    },
+    AppConfig, dashboard, logging,
+    report::{default_output_path, open_report, render_html, resolve_range, write_html_atomically},
     run_profiler,
     service::{ServiceManager, ServiceStatus},
     storage::{ProcessSort, Storage},
@@ -69,6 +66,19 @@ enum Command {
     Report {
         #[command(subcommand)]
         action: ReportCommand,
+    },
+
+    /// Explore retained metrics and evidence in a local read-only dashboard.
+    Dashboard {
+        /// Local loopback port; zero chooses an available port automatically.
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        /// Open the dashboard in the default macOS browser.
+        #[arg(long)]
+        open: bool,
+        /// Override the SQLite database path.
+        #[arg(long)]
+        database: Option<PathBuf>,
     },
 
     /// Install and manage the macOS background service.
@@ -233,6 +243,16 @@ async fn main() -> Result<()> {
         Command::Events { action } => handle_events(action, &mut config),
         Command::Processes { action } => handle_processes(action, &mut config),
         Command::Report { action } => handle_report(action, &mut config),
+        Command::Dashboard {
+            port,
+            open,
+            database,
+        } => {
+            if let Some(database) = database {
+                config.database_path = database;
+            }
+            dashboard::serve(config.database_path, port, open).await
+        }
         Command::Service { action } => handle_service(action),
     }
 }
@@ -250,24 +270,13 @@ fn handle_report(action: ReportCommand, config: &mut AppConfig) -> Result<()> {
             if let Some(database) = database {
                 config.database_path = database;
             }
-            if last.is_some() && (from.is_some() || to.is_some()) {
-                anyhow::bail!("--last cannot be combined with --from or --to");
-            }
             let now = Utc::now();
-            let range = match (from, to) {
-                (Some(from), Some(to)) => {
-                    ReportRange::new(parse_rfc3339_millis(&from)?, parse_rfc3339_millis(&to)?)?
-                }
-                (None, None) => {
-                    let duration = parse_relative_duration(last.as_deref().unwrap_or("1h"))?;
-                    let duration_ms = i64::try_from(duration.as_millis()).unwrap_or(i64::MAX);
-                    ReportRange::new(
-                        now.timestamp_millis().saturating_sub(duration_ms),
-                        now.timestamp_millis(),
-                    )?
-                }
-                _ => anyhow::bail!("--from and --to must be provided together"),
-            };
+            let range = resolve_range(
+                last.as_deref(),
+                from.as_deref(),
+                to.as_deref(),
+                now.timestamp_millis(),
+            )?;
             let output = output.map_or_else(|| default_output_path(now), Ok)?;
             let storage = Storage::open(&config.database_path)?;
             let data = storage.report(range)?;

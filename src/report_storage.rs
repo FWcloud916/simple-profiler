@@ -7,8 +7,8 @@ use rusqlite::{Connection, params};
 use crate::{
     anomaly_storage,
     report::{
-        MAX_CHART_POINTS, ReportData, ReportPoint, ReportProcessSummary, ReportRange,
-        ReportResolution, ReportSeries,
+        DashboardSnapshot, MAX_CHART_POINTS, ReportData, ReportPoint, ReportProcessSummary,
+        ReportRange, ReportResolution, ReportSeries,
     },
 };
 
@@ -50,6 +50,43 @@ pub(crate) fn load_report(connection: &Connection, range: ReportRange) -> Result
     let processes = query_processes(connection, range)?;
     let (process_oldest_ms, process_newest_ms) = process_coverage(connection, range)?;
     Ok(ReportData {
+        generated_at_ms: Utc::now().timestamp_millis(),
+        range,
+        resolution,
+        bucket_span_ms,
+        metric_oldest_ms,
+        metric_newest_ms,
+        process_oldest_ms,
+        process_newest_ms,
+        series,
+        events,
+        events_truncated,
+        processes,
+    })
+}
+
+pub(crate) fn load_dashboard_snapshot(
+    connection: &Connection,
+    range: ReportRange,
+) -> Result<DashboardSnapshot> {
+    let resolution = select_resolution(connection, range)?;
+    let bucket_span_ms = chart_bucket_span_ms(range, resolution);
+    let series = query_series(connection, range, resolution, bucket_span_ms)?;
+    let metric_oldest_ms = series
+        .iter()
+        .flat_map(|series| series.points.first())
+        .map(|point| point.timestamp_ms)
+        .min();
+    let metric_newest_ms = series
+        .iter()
+        .flat_map(|series| series.points.last())
+        .map(|point| point.timestamp_ms)
+        .max();
+    let (events, events_truncated) =
+        anomaly_storage::list_events_in_range(connection, range.from_ms, range.to_ms, EVENT_LIMIT)?;
+    let processes = query_processes(connection, range)?;
+    let (process_oldest_ms, process_newest_ms) = process_coverage(connection, range)?;
+    Ok(DashboardSnapshot {
         generated_at_ms: Utc::now().timestamp_millis(),
         range,
         resolution,

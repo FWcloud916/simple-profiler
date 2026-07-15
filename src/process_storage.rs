@@ -1,5 +1,6 @@
 use anyhow::Result;
 use rusqlite::{Connection, Transaction, params};
+use serde::Serialize;
 
 use crate::{config::ProcessConfig, model::ProcessSnapshot};
 
@@ -9,7 +10,7 @@ pub enum ProcessSort {
     Memory,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct StoredProcessSample {
     pub collected_at_ms: i64,
     pub pid: u32,
@@ -23,7 +24,7 @@ pub struct StoredProcessSample {
     pub memory_rank: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProcessEventEvidence {
     pub kind: String,
     pub sample: StoredProcessSample,

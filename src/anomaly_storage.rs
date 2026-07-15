@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use serde::Serialize;
 
 use crate::{
     anomaly::{AnomalyEngine, Evaluation, Phase, RuleState, Severity, StateKey, Transition},
@@ -10,7 +11,7 @@ use crate::{
 
 const PRELUDE_LIMIT: i64 = 120;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct EventSummary {
     pub id: i64,
     pub rule_id: String,
@@ -24,14 +25,14 @@ pub struct EventSummary {
     pub peak_at_ms: i64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct EventEvidence {
     pub collected_at_ms: i64,
     pub value: f64,
     pub kind: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct EventDetail {
     pub summary: EventSummary,
     pub collector: String,
@@ -435,6 +436,30 @@ pub(crate) fn list_events(
         read_summary,
     )?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub(crate) fn list_events_in_range(
+    connection: &Connection,
+    from_ms: i64,
+    to_ms: i64,
+    limit: usize,
+) -> Result<(Vec<EventSummary>, bool)> {
+    let mut statement = connection.prepare(
+        "SELECT id, rule_id, metric_name, resource, status, severity, started_at_ms,
+                ended_at_ms, peak_value, peak_at_ms
+         FROM anomaly_events
+         WHERE started_at_ms < ?2 AND COALESCE(ended_at_ms, ?2) >= ?1
+         ORDER BY started_at_ms DESC LIMIT ?3",
+    )?;
+    let mut events = statement
+        .query_map(
+            params![from_ms, to_ms, u64_to_integer((limit + 1) as u64)],
+            read_summary,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let truncated = events.len() > limit;
+    events.truncate(limit);
+    Ok((events, truncated))
 }
 
 pub(crate) fn get_event(connection: &Connection, id: i64) -> Result<Option<EventDetail>> {

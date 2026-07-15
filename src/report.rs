@@ -8,13 +8,15 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Local, TimeZone, Utc};
+use serde::Serialize;
 
-use crate::storage::EventDetail;
+use crate::storage::{EventDetail, EventSummary};
 
 pub const MAX_REPORT_RANGE_DAYS: i64 = 365;
 pub const MAX_CHART_POINTS: i64 = 1_200;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReportResolution {
     Raw,
     Minute,
@@ -39,7 +41,7 @@ impl ReportResolution {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ReportRange {
     pub from_ms: i64,
     pub to_ms: i64,
@@ -73,7 +75,7 @@ impl ReportRange {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ReportPoint {
     pub timestamp_ms: i64,
     pub sample_count: i64,
@@ -82,7 +84,7 @@ pub struct ReportPoint {
     pub average_value: f64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ReportSeries {
     pub collector: String,
     pub resource: String,
@@ -95,7 +97,7 @@ pub struct ReportSeries {
     pub points: Vec<ReportPoint>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ReportProcessSummary {
     pub pid: u32,
     pub process_start_time_seconds: u64,
@@ -107,7 +109,7 @@ pub struct ReportProcessSummary {
     pub last_seen_ms: i64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ReportData {
     pub generated_at_ms: i64,
     pub range: ReportRange,
@@ -121,6 +123,44 @@ pub struct ReportData {
     pub events: Vec<EventDetail>,
     pub events_truncated: bool,
     pub processes: Vec<ReportProcessSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DashboardSnapshot {
+    pub generated_at_ms: i64,
+    pub range: ReportRange,
+    pub resolution: ReportResolution,
+    pub bucket_span_ms: i64,
+    pub metric_oldest_ms: Option<i64>,
+    pub metric_newest_ms: Option<i64>,
+    pub process_oldest_ms: Option<i64>,
+    pub process_newest_ms: Option<i64>,
+    pub series: Vec<ReportSeries>,
+    pub events: Vec<EventSummary>,
+    pub events_truncated: bool,
+    pub processes: Vec<ReportProcessSummary>,
+}
+
+pub fn resolve_range(
+    last: Option<&str>,
+    from: Option<&str>,
+    to: Option<&str>,
+    now_ms: i64,
+) -> Result<ReportRange> {
+    if last.is_some() && (from.is_some() || to.is_some()) {
+        bail!("last cannot be combined with from or to");
+    }
+    match (from, to) {
+        (Some(from), Some(to)) => {
+            ReportRange::new(parse_rfc3339_millis(from)?, parse_rfc3339_millis(to)?)
+        }
+        (None, None) => {
+            let duration = parse_relative_duration(last.unwrap_or("1h"))?;
+            let duration_ms = i64::try_from(duration.as_millis()).unwrap_or(i64::MAX);
+            ReportRange::new(now_ms.saturating_sub(duration_ms), now_ms)
+        }
+        _ => bail!("from and to must be provided together"),
+    }
 }
 
 pub fn parse_relative_duration(value: &str) -> Result<Duration> {
@@ -531,6 +571,22 @@ mod tests {
                 .preferred_resolution(),
             ReportResolution::QuarterHour
         );
+    }
+
+    #[test]
+    fn resolves_relative_and_explicit_ranges() {
+        let relative = resolve_range(Some("1h"), None, None, 7_200_000).expect("relative");
+        assert_eq!(relative, ReportRange::new(3_600_000, 7_200_000).unwrap());
+
+        let explicit = resolve_range(
+            None,
+            Some("2026-07-15T00:00:00Z"),
+            Some("2026-07-15T01:00:00Z"),
+            0,
+        )
+        .expect("explicit");
+        assert_eq!(explicit.duration_ms(), 3_600_000);
+        assert!(resolve_range(Some("1h"), Some("2026-07-15T00:00:00Z"), None, 0).is_err());
     }
 
     #[test]
