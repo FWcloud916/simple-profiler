@@ -1,11 +1,11 @@
 # Simple Profiler — Progress
 
-> **Last session:** 2026-07-15 · commit `94e3ad1` · tests: passing (65)
+> **Last session:** 2026-07-15 · commit `e4c0f4c` · tests: passing (66)
 
 ## Now (WIP = 1)
 
-No feature is active. The installed LaunchAgent now runs the schema-v5 Apple GPU release, and
-background GPU metrics plus capability state are advancing on the local Apple M4.
+No feature is active. Retained-history sliding is implemented for the dashboard; upgrading the
+installed binary to expose it through the managed launcher still requires explicit user approval.
 
 ## Feature list
 
@@ -113,6 +113,13 @@ background GPU metrics plus capability state are advancing on the local Apple M4
   as PID 77600. Live status confirmed five Apple GPU metrics share fresh timestamps, capability
   state is available for supported fields, ordinary/process samples continue advancing, and the
   service stderr log has no new errors.
+- The dashboard now moves a fixed-duration window through retained history with a global slider,
+  Earlier/Later/Live controls, direct mouse/touch chart dragging, and Left/Right/Home/End keyboard
+  navigation. Historical movement disables auto-refresh until Live is selected; slider queries are
+  debounced and concurrent refreshes collapse to the newest queued range.
+- Timeline navigation reuses the existing bounded read-only `from`/`to` snapshot API without schema
+  changes or dependencies. The phase passes 66 tests, JavaScriptCore syntax, rustfmt, strict Clippy,
+  release build, embedded-interaction regression checks, and a live explicit-range API smoke test.
 
 ## Blockers
 
@@ -120,12 +127,18 @@ None.
 
 ## Next steps
 
-1. Design NVIDIA and AMD adapters without weakening field-level capability semantics.
-2. Decide whether GPU anomaly rules are useful after observing real retained workloads.
-3. Inspect the first naturally occurring CPU or memory anomaly to validate its preserved process
+1. After explicit approval, upgrade the installed binary to the timeline-navigation release and
+   verify the managed `simple-profiler dashboard` command serves it.
+2. Design NVIDIA and AMD adapters without weakening field-level capability semantics.
+3. Decide whether GPU anomaly rules are useful after observing real retained workloads.
+4. Inspect the first naturally occurring CPU or memory anomaly to validate its preserved process
    evidence in reports and the dashboard.
 
 ## Decision log
+
+- 2026-07-15 — Navigate dashboard history as a fixed-duration time window over retained coverage;
+  support slider/buttons, direct pointer dragging, and keyboard controls while reusing bounded
+  explicit-range queries and disabling auto-refresh during historical exploration.
 
 - 2026-07-15 — Collect Apple GPU device/renderer/tiler utilization and in-use/allocated memory from
   structured non-privileged `ioreg` output every 15 seconds, with a two-second timeout and

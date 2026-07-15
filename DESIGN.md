@@ -87,20 +87,25 @@ Controls use 10px radii, panels 14px, and status badges full-pill radii.
 Component classes include time-range controls, metric summary cards, time-series charts, event
 markers, a keyboard-accessible event drawer, sortable process tables, loading skeletons, empty
 states, and explicit data-unavailable states. Hover, focus, selected, warning, and critical states
-MUST be visible in both themes.
+MUST be visible in both themes. The time navigator uses a retained-coverage track with a visible
+selected-window marker, Earlier/Later/Live controls, and direct chart dragging; focused charts MUST
+also support Left/Right/Home/End navigation.
 
 ## Responsive Behavior
 
 The dashboard is a local web surface supporting widths from 360px upward. Charts remain full width,
 tables scroll horizontally below 760px, the event drawer becomes a full-width sheet below 640px,
-and touch targets remain at least 36px high.
+and touch targets remain at least 36px high. The time slider occupies its own row below 920px;
+horizontal chart gestures MUST preserve normal vertical page scrolling on touch devices.
 
 ## Do's and Don'ts
 
 - **Do** keep units, timestamps, sampling gaps, and unavailable capabilities visible.
+- **Do** show the selected historical window and provide a one-action return to live data.
 - **Do** separate observed evidence from inferred causes.
 - **Do** provide non-color indicators for severity and chart series.
 - **Don't** hide peaks by showing only averages.
+- **Don't** issue an API request for every raw pointer movement; debounce timeline queries.
 - **Don't** present planned collectors as currently available.
 - **Don't** send telemetry or load remote visual assets without an explicit future decision.
 

@@ -138,7 +138,10 @@ cargo run -- dashboard --open
 Without `--open`, the command prints its session URL. The dashboard process remains in the
 foreground until Ctrl-C or SIGTERM, while the installed background collector continues normally.
 It never listens beyond `127.0.0.1`, and each launch uses a new unguessable URL token. Presets cover
-15 minutes through 30 days; custom ranges support up to 365 days.
+15 minutes through 30 days; custom ranges support up to 365 days. The time navigator moves the
+selected window across retained history with a slider, Earlier/Later controls, or direct horizontal
+dragging on any chart. Focused charts also accept Left/Right/Home/End keys, and Live returns to the
+latest preset with auto-refresh enabled.
 
 ### Run in the background on macOS
 

@@ -313,8 +313,13 @@ state, or the running background collector.
    union. `/api/v1/events/<ID>` loads preserved evidence only for the selected event.
 5. The embedded browser client renders light/dark resource charts with min/max bands and explicit
    gaps, a GPU summary, capability health, anomaly drill-down, storage health, and sortable process
-   summaries. It refreshes every 15 seconds by default and uses no remote assets or telemetry.
-6. Ctrl-C or SIGTERM gracefully stops only the dashboard listener. The separately installed
+   summaries. A retained-history slider, Earlier/Later/Live controls, chart pointer dragging, and
+   chart keyboard navigation convert the selected window into existing bounded `from`/`to`
+   requests. Historical navigation disables auto-refresh until Live is selected.
+6. Slider input is debounced before querying, concurrent refresh requests collapse to the newest
+   queued range, and all navigation remains subject to the same 365-day, point, event, process, and
+   four-query admission limits.
+7. Ctrl-C or SIGTERM gracefully stops only the dashboard listener. The separately installed
    background collector and its single writer continue uninterrupted.
 
 The server rejects invalid/over-365-day ranges with HTTP 400, excess concurrent queries with 503,
