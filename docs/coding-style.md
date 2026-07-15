@@ -121,7 +121,8 @@ Documentation MUST distinguish implemented behavior from `planned — no schema 
   SHOULD remain at debug level to avoid needless file growth.
 - Installer writes SHOULD use temporary files plus rename. Normal uninstall MUST preserve user
   configuration, metrics, and logs; destructive purge MUST require an explicit flag and user
-  approval before execution.
+  approval before execution. Managed CLI launchers MUST be identified before replacement or
+  removal; an unrelated user-owned path MUST be preserved.
 - See [project-overview.md](project-overview.md) §3 for the full runtime flow.
 
 ## 6. Running the Linter (Pre-merge)

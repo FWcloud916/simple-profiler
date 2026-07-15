@@ -102,8 +102,11 @@ target/release/simple-profiler service install
 ```
 
 The install command copies the executable, creates a private default configuration when none
-exists, writes `~/Library/LaunchAgents/com.simple-profiler.agent.plist`, and starts the service.
-It changes the current user's macOS service state and SHOULD only be run intentionally.
+exists, writes `~/Library/LaunchAgents/com.simple-profiler.agent.plist`, installs a managed
+`~/.local/bin/simple-profiler` launcher that automatically selects the service configuration, and
+starts the service. It refuses to overwrite an unmanaged file at that command path. `~/.local/bin`
+must be present in the shell's `PATH`. Installation changes the current user's macOS service state
+and SHOULD only be run intentionally.
 
 Inspect or manage it with:
 
@@ -115,7 +118,8 @@ target/release/simple-profiler service restart
 target/release/simple-profiler service uninstall
 ```
 
-Normal uninstall preserves configuration, metrics, and logs. The destructive
+Normal uninstall removes the managed command launcher while preserving configuration, metrics,
+and logs. A user-owned launcher is never removed. The destructive
 `service uninstall --purge` variant removes them too.
 
 ### Test

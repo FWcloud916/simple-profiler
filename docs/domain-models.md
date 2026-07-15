@@ -320,8 +320,10 @@ uninstalled ── install ──► loaded/running
                                 └── restart ───────────────────────────► loaded/running
 ```
 
-Install and upgrade write the executable and plist atomically and preserve an existing private
-configuration. Status combines parsed `launchctl` state with the latest sample, maintenance state,
-and open anomaly counts. Normal uninstall removes only the service binary/plist; `--purge` also
-removes configuration, metrics, and logs. Startup applies built-in schema upgrades; manual
+Install and upgrade write the executable, plist, and managed `~/.local/bin/simple-profiler`
+launcher atomically and preserve an existing private configuration. The launcher selects that
+configuration automatically; install refuses to overwrite an unmanaged file at the same path.
+Status combines parsed `launchctl` state with the latest sample, maintenance state, and open
+anomaly counts. Normal uninstall removes the service binary/plist and managed launcher; `--purge`
+also removes configuration, metrics, and logs. Startup applies built-in schema upgrades; manual
 compaction and repair commands are TBD — not yet designed.

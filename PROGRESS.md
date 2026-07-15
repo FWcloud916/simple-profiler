@@ -1,6 +1,6 @@
 # Simple Profiler — Progress
 
-> **Last session:** 2026-07-15 · commit `dd308fb` · tests: passing (44)
+> **Last session:** 2026-07-15 · commit `3b50d19` · tests: passing (47)
 
 ## Now (WIP = 1)
 
@@ -74,6 +74,9 @@ local HTML diagnostic reports are the next product feature.
   confirms system and process timestamps continue advancing after restart.
 - LaunchAgent upgrade now waits for asynchronous `bootout` removal before `bootstrap`, preventing
   the observed launchd `Operation already in progress` race on consecutive upgrades.
+- `service install` now creates a managed `~/.local/bin/simple-profiler` launcher that automatically
+  uses the private service configuration; upgrades and uninstalls refuse to modify user-owned
+  files at the same path. Live zsh, process-query, and service-status checks pass.
 
 ## Blockers
 
@@ -89,6 +92,8 @@ None.
 
 ## Decision log
 
+- 2026-07-15 — Manage a shell-quoted launcher under `~/.local/bin` during service install so the
+  short CLI command targets the background database; never replace or remove an unmanaged path.
 - 2026-07-15 — Wait up to five seconds for launchd to report an unloaded agent before bootstrapping
   its replacement; `bootout` completion is asynchronous even after launchctl exits successfully.
 - 2026-07-15 — Sample the union of top 10 CPU and top 10 resident-memory processes every 15

@@ -278,10 +278,14 @@ creates these per-user locations:
 ~/Library/Application Support/SimpleProfiler/config.toml
 ~/Library/Application Support/SimpleProfiler/data/simple-profiler.sqlite3
 ~/Library/Logs/SimpleProfiler/
+~/.local/bin/simple-profiler
 ```
 
-Reinstall replaces the executable and plist atomically but preserves an existing configuration.
-Normal uninstall preserves configuration, metrics, and logs; `--purge` is the explicit destructive
+Reinstall replaces the executable, plist, and managed CLI launcher atomically but preserves an
+existing configuration. The launcher automatically passes the private service configuration and
+is only replaced or removed when identified as Simple Profiler-managed; an unrelated user file at
+the same path causes installation to stop safely. `~/.local/bin` must already be in `PATH`. Normal
+uninstall preserves configuration, metrics, and logs; `--purge` is the explicit destructive
 variant. The agent starts on login, restarts only after unsuccessful exit, allows 20 seconds for
 shutdown, and runs as the current user rather than as a system LaunchDaemon.
 
