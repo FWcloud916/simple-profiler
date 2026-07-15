@@ -33,7 +33,8 @@ from one cycle.
 
 **Status: implemented.** A process sample records one bounded ranking entry: collection time, PID,
 process start time, optional parent PID, process name, optional executable path, CPU percentage,
-resident bytes, and optional CPU/memory ranks. PID plus start time is the stable identity used to
+resident bytes, disk I/O deltas/rates, optional network deltas/rates, optional GPU time/usage, and
+per-dimension ranks. PID plus start time is the stable identity used to
 distinguish PID reuse. A `CollectionBatch` combines a `MetricBatch`, one process snapshot, and
 collector capability updates and is the message sent through the bounded Tokio channel. The batch
 is one transaction boundary but has no database identifier or table.
@@ -68,7 +69,7 @@ batch that produced them. This is current state rather than time-series history.
 ### StorageStatus
 
 **Status: implemented, read model.** Contains schema version; row count and optional oldest/newest
-time for raw, one-minute, and 15-minute data; database/WAL/reusable-page sizes; both rollup
+time for metric and process raw, one-minute, and 15-minute data; database/WAL/reusable-page sizes; both rollup
 watermarks; last maintenance time/result; open warning/critical counts; latest event time; and the
 current collector capabilities. It is not persisted as one object.
 
@@ -90,6 +91,14 @@ one-minute or 15-minute bucket.
 
 The primary key is resolution, bucket, collector, normalized resource, and metric name. Upserts
 replace a recomputed bucket, so processing the same completed range again is idempotent.
+
+### ProcessMetricRollup
+
+**Status: implemented in schema v6.** `process_metric_rollups` normalizes CPU, memory, disk read,
+disk write, network receive, network transmit, and optional GPU usage into one metric-name/value
+shape keyed by resolution, bucket, PID, process start time, and metric. It stores count, minimum,
+maximum, sum, weighted average, last value, and best observed rank. Raw process samples are kept 24
+hours, one-minute rollups 7 days, and 15-minute rollups 90 days by default.
 
 ### MaintenanceState
 
@@ -129,10 +138,11 @@ Evidence remains available after the corresponding raw samples expire.
 ### AnomalyEventProcessEvidence
 
 **Status: implemented in SQLite as `anomaly_event_process_evidence`.** CPU events copy top CPU
-rows and memory events copy top memory rows for prelude, trigger, escalation, periodic, and recovery
-checkpoints. Peak-only metric evidence does not add a process checkpoint. Disk-space events are
-not attributed because filesystem pressure cannot be reliably assigned from process CPU or
-resident memory. The default copies at most five rows per checkpoint and 500 rows per event.
+rows, memory events copy top memory rows, and disk-I/O/network/GPU events select their matching
+rank for prelude, trigger, escalation, periodic, and recovery checkpoints. Peak-only metric
+evidence does not add a process checkpoint. Disk-space capacity events are not claimed as direct
+ownership; the dashboard instead shows host-wide process writer context. The default copies at
+most five rows per checkpoint and 500 rows per event.
 Copied evidence remains available after the 24-hour raw process snapshot retention expires.
 
 ### Report
@@ -161,12 +171,13 @@ CollectionCycle (transient) 1──* MetricSample
 CollectionCycle (transient) 1──* ProcessSample
 CollectionCycle (transient) 1──* CollectorCapability (current-state upsert)
 MetricSample *──* MetricRollup   (derived by matching series and time bucket; no foreign key)
+ProcessSample *──* ProcessMetricRollup (derived by process identity, dimension, and bucket)
 MaintenanceState ── stores ──► one-minute and 15-minute watermark keys
 AnomalyRuleState 0..1──0..1 Event
 Event 1──* AnomalyEventEvidence
-Event 1──* AnomalyEventProcessEvidence (CPU/memory events only)
-Report (transient) ── reads ──► MetricSample or MetricRollup, Event, ProcessSample
-DashboardSnapshot (transient) ── reads ──► MetricSample or MetricRollup, Event, ProcessSample
+Event 1──* AnomalyEventProcessEvidence (matching attributable dimensions)
+Report (transient) ── reads ──► metric/process raw or rollup rows and Event
+DashboardSnapshot (transient) ── reads ──► metric/process raw or rollup rows and Event
 
 Device 1··* MetricSample     (planned — no schema yet)
 ```
@@ -198,12 +209,16 @@ its configured interval (60 seconds by default). With idle suppression enabled, 
 read/write bytes or a network interface whose counters are all zero emits no I/O metrics; rollup
 consumers interpret those missing delta intervals as zero activity.
 
-Process CPU usage also requires a previous refresh, so the first due process refresh only warms
-the collector. Later snapshots rank all visible processes, then retain the union of the configured
-top CPU and top resident-memory entries. The default union contains at most 20 rows per snapshot.
+Process CPU, network cumulative counters, and optional GPU cumulative time require a previous
+refresh. Later snapshots rank all visible processes by CPU, memory, disk read/write, available
+network receive/transmit, and available GPU usage, then retain their union with a default hard cap
+of 40 rows. Disk deltas come from `sysinfo`; macOS process network totals come from one bounded
+`nettop` snapshot joined by PID and protected against PID reuse/counter reset.
 On macOS, the GPU collector parses the `AGXAccelerator` property list from `/usr/sbin/ioreg` with a
 two-second timeout. Repeated command failures back off exponentially up to five minutes. Missing
 or invalid fields change only their capability state and never emit a synthetic zero metric.
+Optional GPU attribution reads a fresh, root-owned, non-writable JSON snapshot produced by the
+separate one-shot helper. The user collector never invokes `sudo` or `powermetrics` itself.
 
 ## 4. Storage Flow
 
@@ -226,7 +241,8 @@ or invalid fields change only their capability state and never emit a synthetic 
 Schema version 2 adds `collected_at_ms`, backfills v1 timestamps, and creates `metric_rollups` and
 `maintenance_state`. Schema version 3 creates the three anomaly tables and their query indexes.
 Schema version 4 creates `process_samples` and `anomaly_event_process_evidence`. Schema version 5
-creates `collector_capabilities`. A
+creates `collector_capabilities`. Schema version 6 adds multi-resource process columns and
+`process_metric_rollups`. A
 database newer than the supported version is rejected rather than opened with an incompatible
 writer. Rollup buckets wait for the configured late-arrival grace period.
 One-minute aggregation reads raw rows in timestamp/ID order; 15-minute aggregation combines counts,
@@ -289,19 +305,20 @@ process attribution because the collected process dimensions do not identify fil
    buckets cap each series at approximately 1,200 points while preserving weighted averages and
    observed minima/maxima.
 4. The reader adds at most 200 overlapping anomaly events with their bounded stored evidence, plus
-   the union of the top 20 CPU and top 20 memory process summaries grouped by PID and start time.
+   bounded multi-resource process summaries grouped by PID and start time, selecting process raw
+   or rollup tiers from retained coverage.
 5. The renderer includes current collector capabilities, escapes all persisted labels and names,
    embeds CSS and SVG without JavaScript or external assets, and writes the completed document
    using a temporary sibling plus atomic rename.
 6. Output defaults to `~/Documents/SimpleProfiler Reports/`; `--output` selects another file and
    the opt-in `--open` flag invokes the local macOS viewer after the write succeeds.
 
-Report generation is read-only and does not change schema version 5, retention watermarks, anomaly
+Report generation is read-only and does not change schema version 6, retention watermarks, anomaly
 state, or the running background collector.
 
 ## 7. Dashboard Query Flow
 
-1. `dashboard` verifies that the selected database already uses schema version 5, generates a
+1. `dashboard` verifies that the selected database already uses schema version 6, generates a
    random 128-bit session token, and binds an available `127.0.0.1` port by default.
 2. Requests must carry the generated token in their path and the exact loopback Host value. Only
    versioned `GET` APIs exist; responses disable caching, framing, referrer forwarding, and remote
@@ -309,9 +326,9 @@ state, or the running background collector.
 3. Each API request reserves one of four query slots, opens a short-lived SQLite connection with
    read-only flags inside `spawn_blocking`, performs a bounded query, and closes that connection.
 4. `/api/v1/snapshot` uses the report range resolver, resolution fallback, fixed metric whitelist,
-   approximately 1,200 points per series, 200 event-summary limit, and top-20 CPU/memory process
-   union. It also returns the union of the top three CPU and top three memory process identities,
-   each downsampled to at most approximately 360 raw-process buckets, plus a retained system-memory
+   approximately 1,200 points per series, 200 event-summary limit, and bounded multi-resource
+   process union. It also returns at most three ranked process identities per matching dimension,
+   each downsampled to approximately 360 raw or rollup buckets, plus a retained system-memory
    total for percentage conversion. `/api/v1/events/<ID>` loads preserved evidence only for the
    selected event.
 5. The embedded browser client renders light/dark resource charts with min/max bands and explicit
@@ -319,8 +336,9 @@ state, or the running background collector.
    summaries. A retained-history slider, Earlier/Later/Live controls, chart pointer dragging, and
    chart keyboard navigation convert the selected window into existing bounded `from`/`to`
    requests. Pointer hover or chart focus shows the nearest timestamp and system average/min/max;
-   CPU and memory charts add ranked process lines with color, pattern, label, and tooltip values.
-   Memory process values display both percentage of retained system total and bytes. Historical
+   CPU, memory, disk-I/O, network, and GPU charts add ranked process lines with color, pattern,
+   label, and tooltip values. Memory displays percentage and bytes. Disk-space capacity uses a
+   separate host-wide writer-activity lane because percent and bytes-per-second cannot share a scale. Historical
    navigation disables auto-refresh until Live is selected.
 6. Slider input is debounced before querying, concurrent refresh requests collapse to the newest
    queued range, and all navigation plus process chart series remain subject to the same 365-day,
@@ -365,7 +383,7 @@ registry for validating names and units is TBD — not yet designed.
 ## 9. Failure Behavior
 
 - Invalid sampling/retention values, interval, channel capacity, retention-tier ordering, process
-  ranking limits, event-evidence caps, or GPU timeout/interval values are rejected before the
+  ranking limits, provider timeouts/freshness, event-evidence caps, or GPU interval values are rejected before the
   runtime starts.
 - A collector error is logged, while successful collectors in the same cycle continue to storage.
 - An all-failed cycle does not write an empty batch but still counts toward `--samples`.
@@ -389,6 +407,9 @@ registry for validating names and units is TBD — not yet designed.
   does not affect the collector or SQLite writer.
 - GPU command failures and timeouts emit no GPU metrics, persist degraded field capabilities, and
   back off repeated retries. Missing property-list fields are unavailable rather than zero.
+- Process network/helper failures preserve CPU, memory, and disk samples and update only the
+  affected capability. GPU snapshots are rejected when stale, oversized, non-regular, non-root
+  owned, or group/world writable.
 - `service stop` sends SIGTERM and fails if the process does not report stopped within 20 seconds.
 - `launchctl` failures include stderr context instead of being reported as successful lifecycle
   changes.
@@ -407,7 +428,7 @@ internally. The `status` command shows raw/rollup ranges, storage sizes, waterma
 open-event counts, and current collector capabilities. `events list` lists recent or open events
 and `events show` renders one
 event's thresholds, measurements, counts, metric evidence, and related-process evidence.
-`processes top` renders the latest CPU or resident-memory ranking. `report generate` performs an
+`processes top` renders the latest CPU, memory, disk, network, or GPU ranking. `report generate` performs an
 on-demand read-only query and writes the selected range as local HTML; `dashboard` serves bounded
 read-only JSON queries and compiled-in assets until interrupted. Neither is scheduled. On
 macOS, the `service` command group implements this lifecycle:

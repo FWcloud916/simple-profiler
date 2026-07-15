@@ -41,8 +41,7 @@
     storage: document.querySelector("#storagePanel"),
     processRows: document.querySelector("#processRows"),
     processEmpty: document.querySelector("#processEmpty"),
-    sortCpu: document.querySelector("#sortCpu"),
-    sortMemory: document.querySelector("#sortMemory"),
+    processSort: document.querySelector("#processSort"),
     dialog: document.querySelector("#eventDialog"),
     dialogTitle: document.querySelector("#dialogTitle"),
     dialogBody: document.querySelector("#dialogBody"),
@@ -311,6 +310,9 @@
     head.append(title, stats);
     const processSeries = processSeriesForMetric(series.metric_name);
     card.append(head, renderSvgChart(series, processSeries));
+    if (!processOverlayCompatible(series.metric_name) && processSeries.length) {
+      card.append(renderAttributionLane(series.metric_name, processSeries));
+    }
     const axis = element("div", "chart-axis");
     axis.append(
       textNode(formatShortTime(state.snapshot.range.from_ms)),
@@ -330,7 +332,8 @@
       frame.append(svg);
       return frame;
     }
-    const processPeaks = processSeries.flatMap((process) => process.points.map((point) => processPointValue(point, series.metric_name, "peak"))).filter(Number.isFinite);
+    const overlay = processOverlayCompatible(series.metric_name);
+    const processPeaks = overlay ? processSeries.flatMap((process) => process.points.map((point) => processPointValue(point, series.metric_name, "peak"))).filter(Number.isFinite) : [];
     const lower = series.unit === "percent" ? 0 : Math.min(0, series.min_value);
     const upper = series.unit === "percent"
       ? Math.max(100, series.max_value, ...processPeaks)
@@ -350,10 +353,10 @@
       const line = points.map((point) => scale(point.timestamp_ms, point.average_value)).map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
       svg.append(svgElement("polyline", { points: line, class: "chart-line" }));
     });
-    processSeries.forEach((process) => {
+    if (overlay) processSeries.forEach((process) => {
       const rank = processRank(process, series.metric_name);
       splitSegments(process.points, state.snapshot.process_bucket_span_ms).forEach((points) => {
-        const line = points
+        const line = points.filter((point) => Number.isFinite(processPointValue(point, series.metric_name, "average")))
           .map((point) => scale(point.timestamp_ms, processPointValue(point, series.metric_name, "average")))
           .map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`)
           .join(" ");
@@ -363,6 +366,28 @@
     enableChartTooltip(frame, svg, series, processSeries, scale);
     frame.append(svg);
     return frame;
+  }
+
+  function renderAttributionLane(metricName, processSeries) {
+    const lane = element("div", "process-attribution-lane");
+    lane.append(elementWithText("span", "process-lane-label", "Host-wide process activity"));
+    const svg = svgElement("svg", { viewBox: "0 0 700 54", role: "img", "aria-label": "Process attribution trend" });
+    const values = processSeries.flatMap((process) => process.points.map((point) => processPointValue(point, metricName, "peak"))).filter(Number.isFinite);
+    const max = Math.max(1, ...values);
+    const duration = Math.max(1, state.snapshot.range.to_ms - state.snapshot.range.from_ms);
+    processSeries.forEach((process) => {
+      const rank = processRank(process, metricName);
+      splitSegments(process.points, state.snapshot.process_bucket_span_ms).forEach((points) => {
+        const line = points.filter((point) => Number.isFinite(processPointValue(point, metricName, "average"))).map((point) => {
+          const x = ((point.timestamp_ms - state.snapshot.range.from_ms) / duration) * 700;
+          const y = 50 - (processPointValue(point, metricName, "average") / max) * 44;
+          return `${clamp(x, 0, 700).toFixed(1)},${clamp(y, 4, 50).toFixed(1)}`;
+        }).join(" ");
+        svg.append(svgElement("polyline", { points: line, class: `process-line process-rank-${rank}` }));
+      });
+    });
+    lane.append(svg);
+    return lane;
   }
 
   function renderProcessLegend(metricName, processSeries) {
@@ -413,12 +438,14 @@
           return;
         }
         const average = processPointValue(processPoint, series.metric_name, "average");
-        const [, processY] = scale(processPoint.timestamp_ms, average);
-        setMarker(marker, x, processY);
+        if (processOverlayCompatible(series.metric_name)) {
+          const [, processY] = scale(processPoint.timestamp_ms, average);
+          setMarker(marker, x, processY);
+        } else {
+          marker.setAttribute("visibility", "hidden");
+        }
         const rank = processRank(process, series.metric_name);
-        const value = series.metric_name === "memory.usage"
-          ? `${formatValue(average, "percent")} · ${formatBytes(processPoint.average_memory_bytes)}`
-          : formatValue(average, "percent");
+        const value = formatProcessValue(processPoint, series.metric_name, "average");
         rows.push(tooltipRow(`#${rank} ${process.name}`, value, `PID ${process.pid}`, `process-rank-${rank}`));
       });
       tooltip.replaceChildren(elementWithText("strong", "tooltip-time", formatTime(point.timestamp_ms)), ...rows);
@@ -608,6 +635,9 @@
       ["Raw rows", formatInteger(status.raw.row_count)],
       ["1-minute rows", formatInteger(status.minute.row_count)],
       ["15-minute rows", formatInteger(status.quarter_hour.row_count)],
+      ["Process raw rows", formatInteger(status.processes.row_count)],
+      ["Process 1-minute rows", formatInteger(status.process_minute.row_count)],
+      ["Process 15-minute rows", formatInteger(status.process_quarter_hour.row_count)],
       ["Capabilities", capabilitySummary(status.capabilities)],
       ["Schema", `v${status.schema_version}`],
     ];
@@ -623,9 +653,9 @@
 
   function renderProcesses() {
     const processes = [...state.snapshot.processes];
-    processes.sort((left, right) => state.processSort === "memory"
-      ? right.peak_memory_bytes - left.peak_memory_bytes || right.peak_cpu_percent - left.peak_cpu_percent
-      : right.peak_cpu_percent - left.peak_cpu_percent || right.peak_memory_bytes - left.peak_memory_bytes);
+    const sortFields = { cpu: "peak_cpu_percent", memory: "peak_memory_bytes", diskRead: "peak_disk_read_bytes_per_second", diskWrite: "peak_disk_write_bytes_per_second", networkReceive: "peak_network_receive_bytes_per_second", networkTransmit: "peak_network_transmit_bytes_per_second", gpu: "peak_gpu_usage_percent" };
+    const field = sortFields[state.processSort] || sortFields.cpu;
+    processes.sort((left, right) => (right[field] ?? -1) - (left[field] ?? -1) || right.peak_cpu_percent - left.peak_cpu_percent);
     elements.processRows.replaceChildren(...processes.map((process) => {
       const row = element("tr");
       row.append(
@@ -633,6 +663,9 @@
         elementWithText("td", "", process.pid),
         elementWithText("td", "", `${formatNumber(process.peak_cpu_percent)}%`),
         elementWithText("td", "", formatBytes(process.peak_memory_bytes)),
+        elementWithText("td", "", `${formatRate(process.peak_disk_read_bytes_per_second)} / ${formatRate(process.peak_disk_write_bytes_per_second)}`),
+        elementWithText("td", "", `${formatOptionalRate(process.peak_network_receive_bytes_per_second)} / ${formatOptionalRate(process.peak_network_transmit_bytes_per_second)}`),
+        elementWithText("td", "", process.peak_gpu_usage_percent == null ? "n/a" : `${formatNumber(process.peak_gpu_usage_percent)}%`),
         elementWithText("td", "", formatInteger(process.sample_count)),
         elementWithText("td", "", formatRelative(process.last_seen_ms)),
       );
@@ -703,18 +736,38 @@
   function findSeries(metricName) { return state.snapshot.series.find((series) => series.metric_name === metricName); }
   function findAllSeries(metricName) { return state.snapshot.series.filter((series) => series.metric_name === metricName); }
   function processSeriesForMetric(metricName) {
-    const rankField = metricName === "cpu.total.usage" ? "cpu_rank" : metricName === "memory.usage" && state.snapshot.system_memory_bytes ? "memory_rank" : null;
+    const rankField = processMetricConfig(metricName)?.rank;
     if (!rankField) return [];
     return state.snapshot.process_series
       .filter((series) => series[rankField] != null && series.points.length)
       .sort((left, right) => left[rankField] - right[rankField])
       .slice(0, 3);
   }
-  function processRank(series, metricName) { return metricName === "cpu.total.usage" ? series.cpu_rank : series.memory_rank; }
+  function processMetricConfig(metricName) {
+    if (metricName === "cpu.total.usage") return { rank: "cpu_rank", average: "average_cpu_percent", peak: "peak_cpu_percent", unit: "percent" };
+    if (metricName === "memory.usage" && state.snapshot.system_memory_bytes) return { rank: "memory_rank", average: "average_memory_bytes", peak: "peak_memory_bytes", unit: "memory" };
+    if (metricName === "disk.io.read.rate") return { rank: "disk_read_rank", average: "average_disk_read_bytes_per_second", peak: "peak_disk_read_bytes_per_second", unit: "bytes_per_second" };
+    if (metricName === "disk.io.write.rate" || metricName === "disk.space.usage") return { rank: "disk_write_rank", average: "average_disk_write_bytes_per_second", peak: "peak_disk_write_bytes_per_second", unit: "bytes_per_second" };
+    if (metricName === "network.receive.rate") return { rank: "network_receive_rank", average: "average_network_receive_bytes_per_second", peak: "peak_network_receive_bytes_per_second", unit: "bytes_per_second" };
+    if (metricName === "network.transmit.rate") return { rank: "network_transmit_rank", average: "average_network_transmit_bytes_per_second", peak: "peak_network_transmit_bytes_per_second", unit: "bytes_per_second" };
+    if (metricName.startsWith("gpu.") && metricName.endsWith(".usage")) return { rank: "gpu_rank", average: "average_gpu_usage_percent", peak: "peak_gpu_usage_percent", unit: "percent" };
+    return null;
+  }
+  function processOverlayCompatible(metricName) { return metricName !== "disk.space.usage"; }
+  function processRank(series, metricName) { const config = processMetricConfig(metricName); return config ? series[config.rank] : null; }
   function processPointValue(point, metricName, kind) {
-    if (metricName === "cpu.total.usage") return point[`${kind}_cpu_percent`];
-    const bytes = point[`${kind}_memory_bytes`];
-    return state.snapshot.system_memory_bytes ? (bytes / state.snapshot.system_memory_bytes) * 100 : Number.NaN;
+    const config = processMetricConfig(metricName);
+    if (!config) return Number.NaN;
+    const value = point[config[kind]];
+    if (value == null) return Number.NaN;
+    return config.unit === "memory" ? (value / state.snapshot.system_memory_bytes) * 100 : value;
+  }
+  function formatProcessValue(point, metricName, kind) {
+    const config = processMetricConfig(metricName);
+    const value = processPointValue(point, metricName, kind);
+    if (!config || !Number.isFinite(value)) return "n/a";
+    if (config.unit === "memory") return `${formatValue(value, "percent")} · ${formatBytes(point[config[kind]])}`;
+    return formatValue(value, config.unit);
   }
   function findCapability(name) { return state.status.capabilities.find((capability) => capability.capability === name); }
   function capabilityLabel(value) { return ({ available: "Available", degraded: "Degraded", unavailable: "Unavailable" })[value] || value; }
@@ -773,6 +826,8 @@
     while (amount >= 1024 && index < units.length - 1) { amount /= 1024; index += 1; }
     return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: index ? 2 : 0 }).format(amount)} ${units[index]}`;
   }
+  function formatRate(value) { return `${formatBytes(value ?? 0)}/s`; }
+  function formatOptionalRate(value) { return value == null ? "n/a" : formatRate(value); }
   function formatDuration(milliseconds) { return milliseconds >= 3_600_000 ? `${formatNumber(milliseconds / 3_600_000)}h` : milliseconds >= 60_000 ? `${formatNumber(milliseconds / 60_000)}m` : `${formatNumber(milliseconds / 1000)}s`; }
   function formatTime(timestamp) { return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date(timestamp)); }
   function formatShortTime(timestamp) { return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(timestamp)); }
@@ -810,17 +865,9 @@
     window.clearTimeout(state.navigationTimer);
     navigateToStart(position.start);
   });
-  elements.sortCpu.addEventListener("click", () => { state.processSort = "cpu"; toggleSort(); renderProcesses(); });
-  elements.sortMemory.addEventListener("click", () => { state.processSort = "memory"; toggleSort(); renderProcesses(); });
+  elements.processSort.addEventListener("change", () => { state.processSort = elements.processSort.value; renderProcesses(); });
   elements.closeDialog.addEventListener("click", () => elements.dialog.close());
   elements.dialog.addEventListener("click", (event) => { if (event.target === elements.dialog) elements.dialog.close(); });
-  function toggleSort() {
-    const cpu = state.processSort === "cpu";
-    elements.sortCpu.classList.toggle("selected", cpu);
-    elements.sortCpu.setAttribute("aria-pressed", String(cpu));
-    elements.sortMemory.classList.toggle("selected", !cpu);
-    elements.sortMemory.setAttribute("aria-pressed", String(!cpu));
-  }
 
   const now = new Date();
   elements.to.value = localInputValue(now);

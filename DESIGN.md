@@ -98,8 +98,10 @@ states, and explicit data-unavailable states. Hover, focus, selected, warning, a
 MUST be visible in both themes. The time navigator uses a retained-coverage track with a visible
 selected-window marker, Earlier/Later/Live controls, and direct chart dragging; focused charts MUST
 also support Left/Right/Home/End navigation. Chart inspection uses a vertical guide, point markers,
-and a compact timestamp/value tooltip. CPU and memory charts MAY overlay at most three bounded
-process series per dimension with a visible ranked legend.
+and a compact timestamp/value tooltip. CPU, memory, disk-I/O, network, and GPU charts MAY overlay
+at most three bounded matching process series per dimension with a visible ranked legend. When a
+system and process measure use different units, such as disk-space percent and writer B/s, the
+process series MUST use a labeled attribution lane with its own scale.
 
 ## Responsive Behavior
 
@@ -115,6 +117,9 @@ horizontal chart gestures MUST preserve normal vertical page scrolling on touch 
 - **Do** separate observed evidence from inferred causes.
 - **Do** provide non-color indicators for severity and chart series.
 - **Do** report process memory as both system percentage and bytes in chart tooltips.
+- **Do** label disk and network process attribution as host-wide when the system series is scoped
+  to one mount or interface.
+- **Don't** plot values with different units against one vertical scale.
 - **Don't** hide peaks by showing only averages.
 - **Don't** render unbounded process histories or imply that ranked colors represent severity.
 - **Don't** issue an API request for every raw pointer movement; debounce timeline queries.

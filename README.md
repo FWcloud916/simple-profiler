@@ -17,12 +17,17 @@ A local-first Rust service that continuously records system metrics for later di
   critical, recovery, duration, sample-count, and data-gap rules.
 - Persists anomaly state across restarts and preserves bounded prelude, trigger, escalation, peak,
   periodic, and recovery evidence independently from raw-sample retention.
-- Samples the union of the top 10 CPU and top 10 resident-memory processes every 15 seconds by
-  default, without collecting command lines, environments, or working directories.
-- Attaches bounded top-process evidence to CPU and memory anomaly events; disk-space events are
-  intentionally not attributed to processes.
-- Retains raw samples for 24 hours, one-minute rollups for 30 days, and 15-minute rollups for 365
-  days by default; closed anomaly events are retained for 365 days by default.
+- Samples a bounded union of the top CPU, resident-memory, disk-read/write, network-receive/
+  transmit, and optional GPU processes every 15 seconds, without collecting command lines,
+  environments, or working directories.
+- Uses non-privileged macOS `nettop` process counters for network attribution and `sysinfo` deltas
+  for process disk I/O. Provider failures degrade only the affected dimension.
+- Attaches matching bounded top-process evidence to CPU, memory, disk-I/O, network, and GPU anomaly
+  events; disk-space capacity events show host-wide writer context instead of false filesystem
+  ownership.
+- Retains process raw samples for 24 hours, process one-minute rollups for 7 days, and process
+  15-minute rollups for 90 days. System metric tiers remain 24 hours, 30 days, and 365 days;
+  closed anomaly events are retained for 365 days.
 - Reports schema version, row counts and time ranges by resolution, database/WAL size, rollup
   watermarks, maintenance status, open anomaly counts, and collector capabilities from the command
   line.
@@ -35,8 +40,9 @@ A local-first Rust service that continuously records system metrics for later di
 - Installs and supervises itself as a per-user macOS LaunchAgent, with graceful shutdown,
   single-instance protection, service health output, and bounded log rotation.
 
-NVIDIA/AMD adapters and per-process GPU attribution remain planned. The Apple adapter does not use
-`powermetrics` because it requires superuser privileges.
+NVIDIA/AMD adapters remain planned. Per-process Apple GPU attribution is implemented as an
+optional, separately installed root helper that writes a bounded root-owned snapshot; it is never
+enabled or installed by the normal per-user service command.
 
 ## Quickstart
 
@@ -98,18 +104,38 @@ selects the non-privileged Apple `ioreg` adapter on macOS.
 
 ### Inspect resource-heavy processes
 
-Show the latest CPU or resident-memory ranking:
+Show the latest ranking for any collected process dimension:
 
 ```bash
 cargo run -- processes top --sort cpu --limit 10
 cargo run -- processes top --sort memory --limit 10
+cargo run -- processes top --sort disk-write --limit 10
+cargo run -- processes top --sort network-receive --limit 10
 ```
 
 Process identity uses PID plus process start time, so PID reuse does not merge unrelated
-processes. Raw process snapshots default to 24-hour retention. CPU and memory event evidence is
-copied into the event record and remains available after those snapshots expire. Executable paths
-are disabled by default; command lines, environment variables, and working directories are never
-collected.
+processes. Raw process snapshots default to 24-hour retention and rollups keep bounded trends for
+90 days. Matching event evidence is copied into the event record and remains available after raw
+snapshots expire. Executable paths are disabled by default; command lines, environment variables,
+and working directories are never collected.
+
+### Optional per-process Apple GPU helper
+
+The normal profiler remains a user LaunchAgent. The separately built
+`simple-profiler-gpu-helper` is a one-shot root utility intended for a root LaunchDaemon: it reads
+structured `powermetrics` output and atomically replaces
+`/var/run/simple-profiler/process-gpu.json`. The user process accepts that file only when it is
+root-owned, not group/world writable, at most 1 MiB, and fresh. Build it with:
+
+```bash
+cargo build --release --bin simple-profiler-gpu-helper
+```
+
+[`config/com.simple-profiler.gpu-helper.plist.example`](config/com.simple-profiler.gpu-helper.plist.example)
+is the LaunchDaemon template. Installing the binary/plist and loading the LaunchDaemon changes
+system-wide privileged state and is intentionally not automated; do it only after explicit
+approval. After installation, set
+`gpu_snapshot_path = "/var/run/simple-profiler/process-gpu.json"` under `[process]`.
 
 ### Generate a diagnostic report
 
@@ -142,8 +168,10 @@ It never listens beyond `127.0.0.1`, and each launch uses a new unguessable URL 
 selected window across retained history with a slider, Earlier/Later controls, or direct horizontal
 dragging on any chart. Focused charts also accept Left/Right/Home/End keys, and Live returns to the
 latest preset with auto-refresh enabled. Hovering a chart shows the selected timestamp plus the
-system average, minimum, and maximum. CPU and memory charts also overlay the top three retained
-process series with ranked colors and line patterns; memory tooltips show both percentage and bytes.
+system average, minimum, maximum, and top matching processes. CPU, memory, disk-I/O, network, and
+GPU charts overlay the top three retained process series with ranked colors and line patterns.
+Memory tooltips show percentage and bytes; disk-space capacity uses a separate host-wide writer
+activity lane because percent-used and bytes-per-second are different units.
 
 ### Run in the background on macOS
 

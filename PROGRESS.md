@@ -1,11 +1,12 @@
 # Simple Profiler — Progress
 
-> **Last session:** 2026-07-15 · commit `b39e737` · tests: passing (69)
+> **Last session:** 2026-07-15 · implementation pending commit · tests: passing (74)
 
 ## Now (WIP = 1)
 
-No feature is active. The installed LaunchAgent and managed dashboard launcher now run the chart
-inspection and ranked top-process trend release; background collection remains healthy.
+Multi-resource process attribution is complete in the repository and not yet installed. The
+currently installed LaunchAgent remains on the earlier schema-v5 chart-inspection release until a
+separate explicit upgrade approval.
 
 ## Feature list
 
@@ -15,7 +16,7 @@ inspection and ranked top-process trend release; background collection remains h
 | 2 | Record disk capacity/I/O and network transfer measurements | `cargo test` | passing |
 | 3 | Enforce raw-data retention and create time rollups | `cargo test` | passing |
 | 4 | Detect sustained resource anomalies and preserve event evidence | `cargo test` | passing |
-| 5 | Record bounded top-process snapshots and attribute CPU/memory events | `cargo test` | passing |
+| 5 | Record bounded multi-resource process snapshots, rollups, and event attribution | `cargo test` | passing |
 | 6 | Generate a local HTML diagnostic report for a selected time range | `cargo test` | passing |
 | 7 | Explore metrics and events in a local dashboard | `cargo test` | passing |
 | 8 | Collect GPU measurements through capability-aware platform adapters | `cargo test` | passing |
@@ -135,6 +136,22 @@ inspection and ranked top-process trend release; background collection remains h
   release and restarted as PID 73098. The managed dashboard served tooltip/process-line assets and
   returned CPU Top 3 plus memory Top 3 as five unique series with at most 184 points; system and
   process sample timestamps continued advancing after the temporary dashboard stopped.
+- Schema v6 adds process CPU, memory, disk read/write, optional network receive/transmit, optional
+  GPU time/usage, per-dimension ranks, and lossless migration from schema v5.
+- macOS process network attribution uses bounded non-privileged `nettop` output joined by PID and
+  protected by PID-plus-start-time identity and counter-reset handling. Disk attribution uses
+  `sysinfo` per-refresh deltas. Provider failure degrades only its capability.
+- Process raw/one-minute/15-minute retention is 24 hours/7 days/90 days by default. The single
+  SQLite writer creates weighted, idempotent process rollups before deleting raw rows, and report/
+  dashboard queries select retained raw or rollup coverage.
+- All resource charts show matching ranked processes in tooltips and overlays. Disk-space capacity
+  uses a separate host-wide writer-activity lane because capacity percent and writer B/s differ.
+- A separate one-shot root GPU helper and LaunchDaemon template are implemented but not installed.
+  The user collector consumes only fresh, bounded, root-owned, non-writable snapshot JSON and never
+  invokes `sudo` or privileged `powermetrics` itself.
+- CLI sorting, HTML reports, anomaly process evidence, storage health, config defaults, and core
+  docs cover all process dimensions. Verification passes 74 tests, rustfmt, strict Clippy, schema
+  v5 migration, process-rollup retention, and helper plist parsing tests.
 
 ## Blockers
 
@@ -142,12 +159,23 @@ None.
 
 ## Next steps
 
-1. Design NVIDIA and AMD adapters without weakening field-level capability semantics.
-2. Decide whether GPU anomaly rules are useful after observing real retained workloads.
-3. Inspect the first naturally occurring CPU or memory anomaly to validate its preserved process
-   evidence in reports and the dashboard.
+1. With explicit approval, upgrade the installed user LaunchAgent so its database migrates to v6.
+2. Separately decide whether to install the optional root GPU helper LaunchDaemon.
+3. Observe real disk/network attribution and tune per-dimension top-N limits if necessary.
 
 ## Decision log
+
+- 2026-07-15 — Store a capped union of CPU, memory, disk read/write, network receive/transmit, and
+  optional GPU rankings in schema v6; retain raw/1-minute/15-minute process data for 24h/7d/90d.
+- 2026-07-15 — Use macOS `nettop` as the standard non-privileged process-network provider. Join by
+  PID to sysinfo identity, treat counters as cumulative, and keep CPU/memory/disk collection alive
+  when the provider is unavailable.
+- 2026-07-15 — Keep privileged GPU sampling in a separate one-shot helper intended for an explicit
+  root LaunchDaemon. Communicate through a small atomic root-owned snapshot; never elevate or run
+  `powermetrics` from the per-user collector.
+- 2026-07-15 — Overlay matching-unit process trends on system charts. For disk-space capacity,
+  display host-wide writer activity on an independently scaled lane rather than implying direct
+  mount ownership or mixing percent with B/s.
 
 - 2026-07-15 — Overlay the union of the top three CPU and top three memory process identities on
   system charts using bounded raw-process buckets. Convert memory bytes with a retained system-total

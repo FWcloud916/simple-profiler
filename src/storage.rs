@@ -25,7 +25,7 @@ use crate::{
 pub use crate::anomaly_storage::{EventDetail, EventEvidence, EventSummary};
 pub use crate::process_storage::{ProcessEventEvidence, ProcessSort, StoredProcessSample};
 
-const CURRENT_SCHEMA_VERSION: i64 = 5;
+const CURRENT_SCHEMA_VERSION: i64 = 6;
 const MINUTE_MS: i64 = 60_000;
 const QUARTER_HOUR_MS: i64 = 900_000;
 const MINUTE_WATERMARK: &str = "rollup_60_watermark_ms";
@@ -132,8 +132,41 @@ CREATE TABLE IF NOT EXISTS process_samples (
     executable_path            TEXT,
     cpu_usage_percent          REAL NOT NULL,
     memory_bytes               INTEGER NOT NULL,
+    disk_read_bytes            INTEGER NOT NULL DEFAULT 0,
+    disk_write_bytes           INTEGER NOT NULL DEFAULT 0,
+    disk_read_bytes_per_second REAL NOT NULL DEFAULT 0,
+    disk_write_bytes_per_second REAL NOT NULL DEFAULT 0,
+    network_receive_bytes      INTEGER,
+    network_transmit_bytes     INTEGER,
+    network_receive_bytes_per_second REAL,
+    network_transmit_bytes_per_second REAL,
+    gpu_time_ns                INTEGER,
+    gpu_usage_percent          REAL,
     cpu_rank                   INTEGER,
-    memory_rank                INTEGER
+    memory_rank                INTEGER,
+    disk_read_rank             INTEGER,
+    disk_write_rank            INTEGER,
+    network_receive_rank       INTEGER,
+    network_transmit_rank      INTEGER,
+    gpu_rank                   INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS process_metric_rollups (
+    bucket_start_ms            INTEGER NOT NULL,
+    resolution_seconds        INTEGER NOT NULL,
+    pid                        INTEGER NOT NULL,
+    process_start_time_seconds INTEGER NOT NULL,
+    name                       TEXT NOT NULL,
+    metric_name                TEXT NOT NULL,
+    unit                       TEXT NOT NULL,
+    sample_count               INTEGER NOT NULL,
+    min_value                  REAL NOT NULL,
+    max_value                  REAL NOT NULL,
+    sum_value                  REAL NOT NULL,
+    average_value              REAL NOT NULL,
+    last_value                 REAL NOT NULL,
+    peak_rank                  INTEGER,
+    PRIMARY KEY (resolution_seconds, bucket_start_ms, pid, process_start_time_seconds, metric_name)
 );
 
 CREATE TABLE IF NOT EXISTS anomaly_event_process_evidence (
@@ -148,8 +181,23 @@ CREATE TABLE IF NOT EXISTS anomaly_event_process_evidence (
     executable_path            TEXT,
     cpu_usage_percent          REAL NOT NULL,
     memory_bytes               INTEGER NOT NULL,
+    disk_read_bytes            INTEGER NOT NULL DEFAULT 0,
+    disk_write_bytes           INTEGER NOT NULL DEFAULT 0,
+    disk_read_bytes_per_second REAL NOT NULL DEFAULT 0,
+    disk_write_bytes_per_second REAL NOT NULL DEFAULT 0,
+    network_receive_bytes      INTEGER,
+    network_transmit_bytes     INTEGER,
+    network_receive_bytes_per_second REAL,
+    network_transmit_bytes_per_second REAL,
+    gpu_time_ns                INTEGER,
+    gpu_usage_percent          REAL,
     cpu_rank                   INTEGER,
     memory_rank                INTEGER,
+    disk_read_rank             INTEGER,
+    disk_write_rank            INTEGER,
+    network_receive_rank       INTEGER,
+    network_transmit_rank      INTEGER,
+    gpu_rank                   INTEGER,
     UNIQUE(event_id, collected_at_ms, pid, process_start_time_seconds)
 );
 
@@ -184,6 +232,10 @@ CREATE INDEX IF NOT EXISTS idx_process_samples_time
     ON process_samples(collected_at_ms);
 CREATE INDEX IF NOT EXISTS idx_process_samples_identity_time
     ON process_samples(pid, process_start_time_seconds, collected_at_ms);
+CREATE INDEX IF NOT EXISTS idx_process_metric_rollups_resolution_time
+    ON process_metric_rollups(resolution_seconds, bucket_start_ms);
+CREATE INDEX IF NOT EXISTS idx_process_metric_rollups_metric_time
+    ON process_metric_rollups(metric_name, resolution_seconds, bucket_start_ms);
 CREATE INDEX IF NOT EXISTS idx_anomaly_event_process_evidence_event_time
     ON anomaly_event_process_evidence(event_id, collected_at_ms);
 "#;
@@ -207,6 +259,8 @@ pub struct StorageStatus {
     pub minute: DatasetStatus,
     pub quarter_hour: DatasetStatus,
     pub processes: DatasetStatus,
+    pub process_minute: DatasetStatus,
+    pub process_quarter_hour: DatasetStatus,
     pub database_bytes: u64,
     pub wal_bytes: u64,
     pub free_page_bytes: u64,
@@ -380,10 +434,12 @@ impl Storage {
             retention.delete_batch_rows,
         )?;
         let deleted_events = anomaly_storage::delete_closed_events(&transaction, anomaly, now_ms)?;
-        let deleted_processes = process_storage::delete_expired_samples(
+        let process_maintenance = process_storage::run_maintenance(
             &transaction,
             process,
             now_ms,
+            retention.late_arrival_grace_seconds,
+            retention.rollup_batch_buckets,
             retention.delete_batch_rows,
         )?;
         set_state_integer(&transaction, LAST_MAINTENANCE_MS, now_ms)?;
@@ -391,7 +447,10 @@ impl Storage {
             &transaction,
             LAST_MAINTENANCE_RESULT,
             &format!(
-                "ok: deleted raw={deleted_raw}, minute={deleted_minute}, quarter_hour={deleted_quarter}, processes={deleted_processes}, events={deleted_events}"
+                "ok: deleted raw={deleted_raw}, minute={deleted_minute}, quarter_hour={deleted_quarter}, process_raw={}, process_minute={}, process_quarter_hour={}, events={deleted_events}",
+                process_maintenance.raw,
+                process_maintenance.minute,
+                process_maintenance.quarter_hour,
             ),
         )?;
         transaction.commit()?;
@@ -440,6 +499,16 @@ impl Storage {
             "SELECT COUNT(*), MIN(collected_at_ms), MAX(collected_at_ms) FROM process_samples",
             [],
         )?;
+        let process_minute = dataset_status(
+            &self.connection,
+            "SELECT COUNT(*), MIN(bucket_start_ms), MAX(bucket_start_ms) FROM process_metric_rollups WHERE resolution_seconds=60",
+            [],
+        )?;
+        let process_quarter_hour = dataset_status(
+            &self.connection,
+            "SELECT COUNT(*), MIN(bucket_start_ms), MAX(bucket_start_ms) FROM process_metric_rollups WHERE resolution_seconds=900",
+            [],
+        )?;
         let page_size: i64 = self
             .connection
             .pragma_query_value(None, "page_size", |row| row.get(0))?;
@@ -453,6 +522,8 @@ impl Storage {
             minute,
             quarter_hour,
             processes,
+            process_minute,
+            process_quarter_hour,
             database_bytes: file_size(&self.path),
             wal_bytes: file_size(&PathBuf::from(format!("{}-wal", self.path.display()))),
             free_page_bytes: u64::try_from(page_size.saturating_mul(free_pages)).unwrap_or(0),
@@ -521,11 +592,43 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         }
         transaction.execute_batch(TABLE_SCHEMA)?;
     }
+    for (table, columns) in [
+        ("process_samples", PROCESS_V6_COLUMNS),
+        ("anomaly_event_process_evidence", PROCESS_V6_COLUMNS),
+    ] {
+        for (name, declaration) in columns {
+            if !table_has_column(&transaction, table, name)? {
+                transaction.execute(
+                    &format!("ALTER TABLE {table} ADD COLUMN {name} {declaration}"),
+                    [],
+                )?;
+            }
+        }
+    }
+    transaction.execute_batch(TABLE_SCHEMA)?;
     transaction.execute_batch(INDEX_SCHEMA)?;
     transaction.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     transaction.commit()?;
     Ok(())
 }
+
+const PROCESS_V6_COLUMNS: &[(&str, &str)] = &[
+    ("disk_read_bytes", "INTEGER NOT NULL DEFAULT 0"),
+    ("disk_write_bytes", "INTEGER NOT NULL DEFAULT 0"),
+    ("disk_read_bytes_per_second", "REAL NOT NULL DEFAULT 0"),
+    ("disk_write_bytes_per_second", "REAL NOT NULL DEFAULT 0"),
+    ("network_receive_bytes", "INTEGER"),
+    ("network_transmit_bytes", "INTEGER"),
+    ("network_receive_bytes_per_second", "REAL"),
+    ("network_transmit_bytes_per_second", "REAL"),
+    ("gpu_time_ns", "INTEGER"),
+    ("gpu_usage_percent", "REAL"),
+    ("disk_read_rank", "INTEGER"),
+    ("disk_write_rank", "INTEGER"),
+    ("network_receive_rank", "INTEGER"),
+    ("network_transmit_rank", "INTEGER"),
+    ("gpu_rank", "INTEGER"),
+];
 
 fn table_exists(connection: &Connection, table: &str) -> Result<bool> {
     Ok(connection
@@ -1036,8 +1139,23 @@ mod tests {
             executable_path: None,
             cpu_usage_percent: cpu,
             memory_bytes: memory,
+            disk_read_bytes: 0,
+            disk_write_bytes: 0,
+            disk_read_bytes_per_second: 0.0,
+            disk_write_bytes_per_second: 0.0,
+            network_receive_bytes: None,
+            network_transmit_bytes: None,
+            network_receive_bytes_per_second: None,
+            network_transmit_bytes_per_second: None,
+            gpu_time_ns: None,
+            gpu_usage_percent: None,
             cpu_rank,
             memory_rank,
+            disk_read_rank: None,
+            disk_write_rank: None,
+            network_receive_rank: None,
+            network_transmit_rank: None,
+            gpu_rank: None,
         }
     }
 
@@ -1239,6 +1357,53 @@ mod tests {
         assert!(
             table_exists(&storage.connection, "collector_capabilities").expect("capability table")
         );
+    }
+
+    #[test]
+    fn upgrades_a_v5_process_database_without_losing_samples() {
+        let directory = tempdir().expect("temp dir");
+        let path = directory.path().join("v5.sqlite3");
+        let legacy = Connection::open(&path).expect("legacy");
+        legacy.execute_batch(
+            "CREATE TABLE metric_samples (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, collected_at TEXT NOT NULL,
+               collected_at_ms INTEGER NOT NULL, collector TEXT NOT NULL, resource TEXT,
+               metric_name TEXT NOT NULL, value REAL NOT NULL, unit TEXT NOT NULL);
+             CREATE TABLE process_samples (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, collected_at_ms INTEGER NOT NULL,
+               pid INTEGER NOT NULL, process_start_time_seconds INTEGER NOT NULL,
+               parent_pid INTEGER, name TEXT NOT NULL, executable_path TEXT,
+               cpu_usage_percent REAL NOT NULL, memory_bytes INTEGER NOT NULL,
+               cpu_rank INTEGER, memory_rank INTEGER);
+             CREATE TABLE anomaly_event_process_evidence (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL, kind TEXT NOT NULL,
+               collected_at_ms INTEGER NOT NULL, pid INTEGER NOT NULL,
+               process_start_time_seconds INTEGER NOT NULL, parent_pid INTEGER, name TEXT NOT NULL,
+               executable_path TEXT, cpu_usage_percent REAL NOT NULL, memory_bytes INTEGER NOT NULL,
+               cpu_rank INTEGER, memory_rank INTEGER,
+               UNIQUE(event_id, collected_at_ms, pid, process_start_time_seconds));
+             INSERT INTO process_samples
+               (collected_at_ms,pid,process_start_time_seconds,name,cpu_usage_percent,memory_bytes,cpu_rank)
+               VALUES (1000,42,10,'legacy',12.5,4096,1);
+             PRAGMA user_version=5;"
+        ).expect("v5 schema");
+        drop(legacy);
+
+        let storage = Storage::open(&path).expect("migrate v5");
+        assert_eq!(
+            storage.status().expect("status").schema_version,
+            CURRENT_SCHEMA_VERSION
+        );
+        assert_eq!(storage.status().expect("status").processes.row_count, 1);
+        assert!(
+            table_has_column(
+                &storage.connection,
+                "process_samples",
+                "network_receive_bytes_per_second"
+            )
+            .expect("column")
+        );
+        assert!(table_exists(&storage.connection, "process_metric_rollups").expect("rollup table"));
     }
 
     #[test]
@@ -1657,6 +1822,73 @@ mod tests {
         assert_eq!(count, 3);
         assert_eq!(sum, 70.0);
         assert!((average - (70.0 / 3.0)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn process_rollups_preserve_resource_attribution_after_raw_retention() {
+        let directory = tempdir().expect("temp dir");
+        let path = directory.path().join("process-rollups.sqlite3");
+        let mut storage = Storage::open(&path).expect("storage");
+        let anomaly = AnomalyConfig::default();
+        let process = ProcessConfig {
+            raw_retention_hours: 1,
+            minute_retention_days: 1,
+            quarter_hour_retention_days: 2,
+            ..ProcessConfig::default()
+        };
+        let mut engine = storage.load_anomaly_engine(&anomaly).expect("engine");
+        let mut writer = process_sample(10, 42, "writer", 30.0, 4096, Some(2), Some(1));
+        writer.disk_write_bytes = 15_000;
+        writer.disk_write_bytes_per_second = 1_000.0;
+        writer.disk_write_rank = Some(1);
+        let mut cpu_heavy = process_sample(10, 43, "cpu-heavy", 90.0, 2048, Some(1), Some(2));
+        cpu_heavy.disk_write_bytes_per_second = 10.0;
+        cpu_heavy.disk_write_rank = Some(2);
+        storage
+            .insert_batch_with_anomalies(
+                &CollectionBatch {
+                    processes: vec![writer, cpu_heavy],
+                    ..CollectionBatch::default()
+                },
+                &mut engine,
+                &anomaly,
+                &process,
+            )
+            .expect("sample");
+
+        storage
+            .run_maintenance_with_anomalies(
+                &test_retention(),
+                &anomaly,
+                &process,
+                at(2 * 60 * 60 * 1_000),
+            )
+            .expect("maintenance");
+
+        assert_eq!(storage.status().expect("status").processes.row_count, 0);
+        let rollups: i64 = storage.connection.query_row(
+            "SELECT COUNT(*) FROM process_metric_rollups WHERE metric_name='process.disk.write.rate'",
+            [],
+            |row| row.get(0),
+        ).expect("rollups");
+        assert!(rollups > 0);
+        let snapshot = storage
+            .dashboard_snapshot(ReportRange::new(0, 60 * 60 * 1_000).expect("range"))
+            .expect("snapshot");
+        assert!(snapshot.process_series.iter().any(|series| {
+            series.name == "writer"
+                && series.disk_write_rank == Some(1)
+                && series
+                    .points
+                    .iter()
+                    .any(|point| point.peak_disk_write_bytes_per_second == 1_000.0)
+        }));
+        assert!(
+            snapshot
+                .process_series
+                .iter()
+                .any(|series| series.name == "cpu-heavy" && series.cpu_rank == Some(1))
+        );
     }
 
     #[test]

@@ -60,8 +60,23 @@ pub struct ProcessSample {
     pub executable_path: Option<String>,
     pub cpu_usage_percent: f64,
     pub memory_bytes: u64,
+    pub disk_read_bytes: u64,
+    pub disk_write_bytes: u64,
+    pub disk_read_bytes_per_second: f64,
+    pub disk_write_bytes_per_second: f64,
+    pub network_receive_bytes: Option<u64>,
+    pub network_transmit_bytes: Option<u64>,
+    pub network_receive_bytes_per_second: Option<f64>,
+    pub network_transmit_bytes_per_second: Option<f64>,
+    pub gpu_time_ns: Option<u64>,
+    pub gpu_usage_percent: Option<f64>,
     pub cpu_rank: Option<u32>,
     pub memory_rank: Option<u32>,
+    pub disk_read_rank: Option<u32>,
+    pub disk_write_rank: Option<u32>,
+    pub network_receive_rank: Option<u32>,
+    pub network_transmit_rank: Option<u32>,
+    pub gpu_rank: Option<u32>,
 }
 
 pub type ProcessSnapshot = Vec<ProcessSample>;

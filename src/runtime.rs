@@ -81,26 +81,31 @@ async fn run_with_collectors(
                     }
                 }
 
-                let processes = match process_collector.collect(&context).await {
-                    Ok(Some(snapshot)) => snapshot,
-                    Ok(None) => Vec::new(),
+                let process = match process_collector.collect(&context).await {
+                    Ok(Some(collection)) => collection,
+                    Ok(None) => Default::default(),
                     Err(error) => {
                         warn!(collector = "process", %error, "collection failed");
-                        Vec::new()
+                        Default::default()
                     }
                 };
+                for warning in &process.warnings {
+                    warn!(collector = "process", error = %warning, "collection degraded");
+                }
                 let gpu = gpu_collector.collect(&context).await.unwrap_or_default();
                 if let Some(warning) = &gpu.warning {
                     warn!(collector = "gpu", error = %warning, "collection degraded");
                 }
                 cycle_batch.extend(gpu.metrics);
                 let metric_count = cycle_batch.len();
-                let process_count = processes.len();
-                let capability_count = gpu.capabilities.len();
+                let process_count = process.samples.len();
+                let capability_count = gpu.capabilities.len() + process.capabilities.len();
+                let mut capabilities = gpu.capabilities;
+                capabilities.extend(process.capabilities);
                 let storage_batch = CollectionBatch {
                     metrics: cycle_batch,
-                    processes,
-                    capabilities: gpu.capabilities,
+                    processes: process.samples,
+                    capabilities,
                 };
                 if !storage_batch.is_empty() {
                     sender.send(storage_batch).await.context("storage writer stopped")?;

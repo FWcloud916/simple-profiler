@@ -59,8 +59,10 @@ cargo clippy --all-targets --all-features -- -D warnings
 - Blocking SQLite work stays in the storage writer's blocking task.
 - Anomaly rules and state transitions live in `src/anomaly.rs`; their SQLite representation and
   evidence queries live in `src/anomaly_storage.rs`.
-- Process snapshot persistence, ranking queries, retention, and anomaly attribution live in
+- Process snapshot persistence, multi-resource rollups, ranking queries, retention, and anomaly attribution live in
   `src/process_storage.rs` and remain owned by the single writer transaction.
+- Privileged GPU collection, when explicitly requested, MUST remain in the separate one-shot helper;
+  the normal collector MUST consume only a validated root-owned snapshot and MUST NOT invoke sudo.
 - Collector capability upserts and reads live in `src/capability_storage.rs` and remain owned by
   the same writer transaction as their metric batch.
 - Report time-range parsing and HTML rendering live in `src/report.rs`; bounded, read-only report

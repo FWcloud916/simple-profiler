@@ -68,10 +68,22 @@ pub struct ProcessConfig {
     pub interval_seconds: u64,
     pub top_cpu: usize,
     pub top_memory: usize,
+    pub top_disk: usize,
+    pub top_network: usize,
+    pub top_gpu: usize,
+    pub max_snapshot_processes: usize,
     pub raw_retention_hours: u64,
+    pub minute_retention_days: u64,
+    pub quarter_hour_retention_days: u64,
     pub event_top_n: usize,
     pub event_evidence_max_rows: usize,
     pub include_executable_path: bool,
+    pub network_enabled: bool,
+    pub network_command: PathBuf,
+    pub network_command_timeout_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_snapshot_path: Option<PathBuf>,
+    pub gpu_snapshot_max_age_seconds: u64,
 }
 
 impl Default for ProcessConfig {
@@ -81,10 +93,21 @@ impl Default for ProcessConfig {
             interval_seconds: 15,
             top_cpu: 10,
             top_memory: 10,
+            top_disk: 10,
+            top_network: 10,
+            top_gpu: 10,
+            max_snapshot_processes: 40,
             raw_retention_hours: 24,
+            minute_retention_days: 7,
+            quarter_hour_retention_days: 90,
             event_top_n: 5,
             event_evidence_max_rows: 500,
             include_executable_path: false,
+            network_enabled: cfg!(target_os = "macos"),
+            network_command: PathBuf::from("/usr/bin/nettop"),
+            network_command_timeout_seconds: 5,
+            gpu_snapshot_path: None,
+            gpu_snapshot_max_age_seconds: 45,
         }
     }
 }
@@ -312,20 +335,46 @@ impl AppConfig {
         if process.interval_seconds == 0
             || process.top_cpu == 0
             || process.top_memory == 0
+            || process.top_disk == 0
+            || process.top_network == 0
+            || process.top_gpu == 0
+            || process.max_snapshot_processes == 0
             || process.raw_retention_hours == 0
+            || process.minute_retention_days == 0
+            || process.quarter_hour_retention_days == 0
             || process.event_top_n == 0
             || process.event_evidence_max_rows == 0
+            || process.network_command_timeout_seconds == 0
+            || process.gpu_snapshot_max_age_seconds == 0
         {
             bail!("process intervals, limits, and retention must be greater than zero");
         }
-        if process.top_cpu > 100 || process.top_memory > 100 {
-            bail!("process top_cpu and top_memory must not exceed 100");
+        if [
+            process.top_cpu,
+            process.top_memory,
+            process.top_disk,
+            process.top_network,
+            process.top_gpu,
+            process.max_snapshot_processes,
+        ]
+        .into_iter()
+        .any(|limit| limit > 100)
+        {
+            bail!("process ranking limits must not exceed 100");
         }
         if process.event_top_n > process.top_cpu.min(process.top_memory) {
             bail!("process event_top_n must not exceed top_cpu or top_memory");
         }
         if process.event_evidence_max_rows < process.event_top_n {
             bail!("process event_evidence_max_rows must be at least event_top_n");
+        }
+        if process.minute_retention_days.saturating_mul(24) < process.raw_retention_hours
+            || process.quarter_hour_retention_days < process.minute_retention_days
+        {
+            bail!("process retention must satisfy raw <= minute <= quarter_hour");
+        }
+        if process.network_command_timeout_seconds > 30 {
+            bail!("process network provider timeout must not exceed 30 seconds");
         }
         Ok(())
     }

@@ -47,6 +47,22 @@ struct ProcessSeriesSelection {
     name: String,
     cpu_rank: Option<u8>,
     memory_rank: Option<u8>,
+    disk_read_rank: Option<u8>,
+    disk_write_rank: Option<u8>,
+    network_receive_rank: Option<u8>,
+    network_transmit_rank: Option<u8>,
+    gpu_rank: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ProcessDimension {
+    Cpu,
+    Memory,
+    DiskRead,
+    DiskWrite,
+    NetworkReceive,
+    NetworkTransmit,
+    Gpu,
 }
 
 pub(crate) fn load_report(connection: &Connection, range: ReportRange) -> Result<ReportData> {
@@ -329,12 +345,28 @@ fn query_processes(
     connection: &Connection,
     range: ReportRange,
 ) -> Result<Vec<ReportProcessSummary>> {
+    if let Some(resolution) = select_process_rollup_resolution(connection, range)? {
+        return query_rollup_processes(connection, range, resolution);
+    }
     let mut summaries = BTreeMap::new();
-    for order_column in ["peak_cpu", "peak_memory"] {
+    for order_column in [
+        "peak_cpu",
+        "peak_memory",
+        "peak_disk_read",
+        "peak_disk_write",
+        "peak_network_receive",
+        "peak_network_transmit",
+        "peak_gpu",
+    ] {
         let sql = format!(
             "SELECT pid, process_start_time_seconds, MAX(name),
                     MAX(cpu_usage_percent) AS peak_cpu,
                     MAX(memory_bytes) AS peak_memory,
+                    MAX(disk_read_bytes_per_second) AS peak_disk_read,
+                    MAX(disk_write_bytes_per_second) AS peak_disk_write,
+                    MAX(network_receive_bytes_per_second) AS peak_network_receive,
+                    MAX(network_transmit_bytes_per_second) AS peak_network_transmit,
+                    MAX(gpu_usage_percent) AS peak_gpu,
                     COUNT(*), MIN(collected_at_ms), MAX(collected_at_ms)
              FROM process_samples
              WHERE collected_at_ms >= ?1 AND collected_at_ms < ?2
@@ -359,9 +391,14 @@ fn query_processes(
                     name: row.get(2)?,
                     peak_cpu_percent: row.get(3)?,
                     peak_memory_bytes: u64::try_from(memory_value).unwrap_or(0),
-                    sample_count: row.get(5)?,
-                    first_seen_ms: row.get(6)?,
-                    last_seen_ms: row.get(7)?,
+                    peak_disk_read_bytes_per_second: row.get(5)?,
+                    peak_disk_write_bytes_per_second: row.get(6)?,
+                    peak_network_receive_bytes_per_second: row.get(7)?,
+                    peak_network_transmit_bytes_per_second: row.get(8)?,
+                    peak_gpu_usage_percent: row.get(9)?,
+                    sample_count: row.get(10)?,
+                    first_seen_ms: row.get(11)?,
+                    last_seen_ms: row.get(12)?,
                 })
             },
         )?;
@@ -385,17 +422,142 @@ fn query_processes(
     Ok(values)
 }
 
+fn select_process_rollup_resolution(
+    connection: &Connection,
+    range: ReportRange,
+) -> Result<Option<i64>> {
+    let raw_oldest: Option<i64> = connection.query_row(
+        "SELECT MIN(collected_at_ms) FROM process_samples WHERE collected_at_ms < ?1",
+        [range.to_ms],
+        |row| row.get(0),
+    )?;
+    if raw_oldest.is_some_and(|oldest| oldest <= range.from_ms) {
+        return Ok(None);
+    }
+    for resolution in [60_i64, 900] {
+        let oldest: Option<i64> = connection.query_row(
+            "SELECT MIN(bucket_start_ms) FROM process_metric_rollups
+             WHERE resolution_seconds = ?1 AND bucket_start_ms < ?2",
+            params![resolution, range.to_ms],
+            |row| row.get(0),
+        )?;
+        if oldest.is_some_and(|oldest| oldest <= range.from_ms) {
+            return Ok(Some(resolution));
+        }
+    }
+    Ok(None)
+}
+
+fn query_rollup_processes(
+    connection: &Connection,
+    range: ReportRange,
+    resolution: i64,
+) -> Result<Vec<ReportProcessSummary>> {
+    let mut summaries = BTreeMap::new();
+    for order_column in [
+        "peak_cpu",
+        "peak_memory",
+        "peak_disk_read",
+        "peak_disk_write",
+        "peak_network_receive",
+        "peak_network_transmit",
+        "peak_gpu",
+    ] {
+        let sql = format!(
+            "SELECT pid, process_start_time_seconds, MAX(name),
+                      MAX(CASE WHEN metric_name='process.cpu.usage' THEN max_value END),
+                      MAX(CASE WHEN metric_name='process.memory.bytes' THEN max_value END),
+                      MAX(CASE WHEN metric_name='process.disk.read.rate' THEN max_value END),
+                      MAX(CASE WHEN metric_name='process.disk.write.rate' THEN max_value END),
+                      MAX(CASE WHEN metric_name='process.network.receive.rate' THEN max_value END),
+                      MAX(CASE WHEN metric_name='process.network.transmit.rate' THEN max_value END),
+                      MAX(CASE WHEN metric_name='process.gpu.usage' THEN max_value END),
+                      SUM(CASE WHEN metric_name='process.cpu.usage' THEN sample_count ELSE 0 END),
+                      MIN(bucket_start_ms), MAX(bucket_start_ms),
+                      MAX(CASE WHEN metric_name='process.cpu.usage' THEN max_value END) AS peak_cpu,
+                      MAX(CASE WHEN metric_name='process.memory.bytes' THEN max_value END) AS peak_memory,
+                      MAX(CASE WHEN metric_name='process.disk.read.rate' THEN max_value END) AS peak_disk_read,
+                      MAX(CASE WHEN metric_name='process.disk.write.rate' THEN max_value END) AS peak_disk_write,
+                      MAX(CASE WHEN metric_name='process.network.receive.rate' THEN max_value END) AS peak_network_receive,
+                      MAX(CASE WHEN metric_name='process.network.transmit.rate' THEN max_value END) AS peak_network_transmit,
+                      MAX(CASE WHEN metric_name='process.gpu.usage' THEN max_value END) AS peak_gpu
+               FROM process_metric_rollups
+               WHERE resolution_seconds=?1 AND bucket_start_ms>=?2 AND bucket_start_ms<?3
+               GROUP BY pid, process_start_time_seconds
+               ORDER BY {order_column} DESC, pid LIMIT ?4"
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map(
+            params![
+                resolution,
+                range.from_ms,
+                range.to_ms,
+                i64::try_from(PROCESS_LIMIT_PER_DIMENSION).unwrap_or(i64::MAX)
+            ],
+            read_rollup_process_summary,
+        )?;
+        for summary in rows {
+            let summary = summary?;
+            summaries.insert((summary.pid, summary.process_start_time_seconds), summary);
+        }
+    }
+    let mut values: Vec<_> = summaries.into_values().collect();
+    values.sort_by(|left, right| {
+        right
+            .peak_cpu_percent
+            .total_cmp(&left.peak_cpu_percent)
+            .then_with(|| right.peak_memory_bytes.cmp(&left.peak_memory_bytes))
+            .then_with(|| left.pid.cmp(&right.pid))
+    });
+    Ok(values)
+}
+
+fn read_rollup_process_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReportProcessSummary> {
+    let memory = row.get::<_, Option<f64>>(4)?.unwrap_or(0.0);
+    Ok(ReportProcessSummary {
+        pid: u32::try_from(row.get::<_, i64>(0)?).unwrap_or(0),
+        process_start_time_seconds: u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+        name: row.get(2)?,
+        peak_cpu_percent: row.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+        peak_memory_bytes: float_to_u64(memory).unwrap_or(0),
+        peak_disk_read_bytes_per_second: row.get::<_, Option<f64>>(5)?.unwrap_or(0.0),
+        peak_disk_write_bytes_per_second: row.get::<_, Option<f64>>(6)?.unwrap_or(0.0),
+        peak_network_receive_bytes_per_second: row.get(7)?,
+        peak_network_transmit_bytes_per_second: row.get(8)?,
+        peak_gpu_usage_percent: row.get(9)?,
+        sample_count: row.get(10)?,
+        first_seen_ms: row.get(11)?,
+        last_seen_ms: row.get(12)?,
+    })
+}
+
 fn query_process_series(
     connection: &Connection,
     range: ReportRange,
 ) -> Result<(i64, Option<u64>, Vec<DashboardProcessSeries>)> {
     let process_bucket_span_ms = process_chart_bucket_span_ms(range);
+    if let Some(resolution) = select_process_rollup_resolution(connection, range)? {
+        return query_rollup_process_series(connection, range, resolution, process_bucket_span_ms);
+    }
     let mut selected: BTreeMap<(u32, u64), ProcessSeriesSelection> = BTreeMap::new();
-    for (order_column, cpu_dimension) in [("peak_cpu", true), ("peak_memory", false)] {
+    for (order_column, dimension) in [
+        ("peak_cpu", ProcessDimension::Cpu),
+        ("peak_memory", ProcessDimension::Memory),
+        ("peak_disk_read", ProcessDimension::DiskRead),
+        ("peak_disk_write", ProcessDimension::DiskWrite),
+        ("peak_network_receive", ProcessDimension::NetworkReceive),
+        ("peak_network_transmit", ProcessDimension::NetworkTransmit),
+        ("peak_gpu", ProcessDimension::Gpu),
+    ] {
         let sql = format!(
             "SELECT pid, process_start_time_seconds, MAX(name),
                     MAX(cpu_usage_percent) AS peak_cpu,
-                    MAX(memory_bytes) AS peak_memory
+                    MAX(memory_bytes) AS peak_memory,
+                    MAX(disk_read_bytes_per_second) AS peak_disk_read,
+                    MAX(disk_write_bytes_per_second) AS peak_disk_write,
+                    MAX(network_receive_bytes_per_second) AS peak_network_receive,
+                    MAX(network_transmit_bytes_per_second) AS peak_network_transmit,
+                    MAX(gpu_usage_percent) AS peak_gpu
              FROM process_samples
              WHERE collected_at_ms >= ?1 AND collected_at_ms < ?2
              GROUP BY pid, process_start_time_seconds
@@ -429,12 +591,21 @@ fn query_process_series(
                     name,
                     cpu_rank: None,
                     memory_rank: None,
+                    disk_read_rank: None,
+                    disk_write_rank: None,
+                    network_receive_rank: None,
+                    network_transmit_rank: None,
+                    gpu_rank: None,
                 });
             let rank = Some(u8::try_from(index + 1).unwrap_or(u8::MAX));
-            if cpu_dimension {
-                selection.cpu_rank = rank;
-            } else {
-                selection.memory_rank = rank;
+            match dimension {
+                ProcessDimension::Cpu => selection.cpu_rank = rank,
+                ProcessDimension::Memory => selection.memory_rank = rank,
+                ProcessDimension::DiskRead => selection.disk_read_rank = rank,
+                ProcessDimension::DiskWrite => selection.disk_write_rank = rank,
+                ProcessDimension::NetworkReceive => selection.network_receive_rank = rank,
+                ProcessDimension::NetworkTransmit => selection.network_transmit_rank = rank,
+                ProcessDimension::Gpu => selection.gpu_rank = rank,
             }
         }
     }
@@ -444,7 +615,12 @@ fn query_process_series(
         let mut statement = connection.prepare(
             "SELECT ((collected_at_ms - ?1) / ?5) * ?5 + ?1 AS chart_bucket,
                     AVG(cpu_usage_percent), MAX(cpu_usage_percent),
-                    AVG(memory_bytes), MAX(memory_bytes)
+                    AVG(memory_bytes), MAX(memory_bytes),
+                    AVG(disk_read_bytes_per_second), MAX(disk_read_bytes_per_second),
+                    AVG(disk_write_bytes_per_second), MAX(disk_write_bytes_per_second),
+                    AVG(network_receive_bytes_per_second), MAX(network_receive_bytes_per_second),
+                    AVG(network_transmit_bytes_per_second), MAX(network_transmit_bytes_per_second),
+                    AVG(gpu_usage_percent), MAX(gpu_usage_percent)
              FROM process_samples
              WHERE collected_at_ms >= ?1 AND collected_at_ms < ?2
                AND pid = ?3 AND process_start_time_seconds = ?4
@@ -467,6 +643,16 @@ fn query_process_series(
                     peak_cpu_percent: row.get(2)?,
                     average_memory_bytes: row.get(3)?,
                     peak_memory_bytes: u64::try_from(peak_memory).unwrap_or(0),
+                    average_disk_read_bytes_per_second: row.get(5)?,
+                    peak_disk_read_bytes_per_second: row.get(6)?,
+                    average_disk_write_bytes_per_second: row.get(7)?,
+                    peak_disk_write_bytes_per_second: row.get(8)?,
+                    average_network_receive_bytes_per_second: row.get(9)?,
+                    peak_network_receive_bytes_per_second: row.get(10)?,
+                    average_network_transmit_bytes_per_second: row.get(11)?,
+                    peak_network_transmit_bytes_per_second: row.get(12)?,
+                    average_gpu_usage_percent: row.get(13)?,
+                    peak_gpu_usage_percent: row.get(14)?,
                 })
             },
         )?;
@@ -476,11 +662,22 @@ fn query_process_series(
             name: selection.name,
             cpu_rank: selection.cpu_rank,
             memory_rank: selection.memory_rank,
+            disk_read_rank: selection.disk_read_rank,
+            disk_write_rank: selection.disk_write_rank,
+            network_receive_rank: selection.network_receive_rank,
+            network_transmit_rank: selection.network_transmit_rank,
+            gpu_rank: selection.gpu_rank,
             points: rows.collect::<rusqlite::Result<Vec<_>>>()?,
         });
     }
 
-    let memory_total = connection
+    let memory_total = query_memory_total(connection, range)?;
+
+    Ok((process_bucket_span_ms, memory_total, process_series))
+}
+
+fn query_memory_total(connection: &Connection, range: ReportRange) -> Result<Option<u64>> {
+    let raw = connection
         .query_row(
             "SELECT value FROM metric_samples
              WHERE collected_at_ms >= ?1 AND collected_at_ms < ?2
@@ -491,8 +688,181 @@ fn query_process_series(
         )
         .optional()?
         .and_then(float_to_u64);
+    if raw.is_some() {
+        return Ok(raw);
+    }
+    Ok(connection
+        .query_row(
+            "SELECT last_value FROM metric_rollups
+         WHERE bucket_start_ms >= ?1 AND bucket_start_ms < ?2
+           AND metric_name='memory.total'
+         ORDER BY bucket_start_ms DESC LIMIT 1",
+            params![range.from_ms, range.to_ms],
+            |row| row.get::<_, f64>(0),
+        )
+        .optional()?
+        .and_then(float_to_u64))
+}
 
-    Ok((process_bucket_span_ms, memory_total, process_series))
+fn query_rollup_process_series(
+    connection: &Connection,
+    range: ReportRange,
+    resolution: i64,
+    bucket_span_ms: i64,
+) -> Result<(i64, Option<u64>, Vec<DashboardProcessSeries>)> {
+    let summaries = query_rollup_processes(connection, range, resolution)?;
+    let mut selected: BTreeMap<_, (ReportProcessSummary, [Option<u8>; 7])> = BTreeMap::new();
+    for dimension in [
+        ProcessDimension::Cpu,
+        ProcessDimension::Memory,
+        ProcessDimension::DiskRead,
+        ProcessDimension::DiskWrite,
+        ProcessDimension::NetworkReceive,
+        ProcessDimension::NetworkTransmit,
+        ProcessDimension::Gpu,
+    ] {
+        let mut ranked: Vec<_> = summaries
+            .iter()
+            .filter(|summary| rollup_dimension_available(summary, dimension))
+            .collect();
+        ranked.sort_by(|left, right| {
+            rollup_dimension_value(right, dimension)
+                .total_cmp(&rollup_dimension_value(left, dimension))
+                .then_with(|| left.pid.cmp(&right.pid))
+        });
+        for (index, process) in ranked
+            .into_iter()
+            .take(PROCESS_CHART_LIMIT_PER_DIMENSION)
+            .enumerate()
+        {
+            let entry = selected
+                .entry((process.pid, process.process_start_time_seconds))
+                .or_insert_with(|| (process.clone(), [None; 7]));
+            entry.1[process_dimension_index(dimension)] =
+                Some(u8::try_from(index + 1).unwrap_or(u8::MAX));
+        }
+    }
+    let mut series = Vec::new();
+    for (process, ranks) in selected.into_values() {
+        let mut statement = connection.prepare(
+            "SELECT ((bucket_start_ms - ?1) / ?5) * ?5 + ?1 AS chart_bucket,
+                    SUM(CASE WHEN metric_name='process.cpu.usage' THEN sum_value END) / NULLIF(SUM(CASE WHEN metric_name='process.cpu.usage' THEN sample_count END),0),
+                    MAX(CASE WHEN metric_name='process.cpu.usage' THEN max_value END),
+                    SUM(CASE WHEN metric_name='process.memory.bytes' THEN sum_value END) / NULLIF(SUM(CASE WHEN metric_name='process.memory.bytes' THEN sample_count END),0),
+                    MAX(CASE WHEN metric_name='process.memory.bytes' THEN max_value END),
+                    SUM(CASE WHEN metric_name='process.disk.read.rate' THEN sum_value END) / NULLIF(SUM(CASE WHEN metric_name='process.disk.read.rate' THEN sample_count END),0),
+                    MAX(CASE WHEN metric_name='process.disk.read.rate' THEN max_value END),
+                    SUM(CASE WHEN metric_name='process.disk.write.rate' THEN sum_value END) / NULLIF(SUM(CASE WHEN metric_name='process.disk.write.rate' THEN sample_count END),0),
+                    MAX(CASE WHEN metric_name='process.disk.write.rate' THEN max_value END),
+                    SUM(CASE WHEN metric_name='process.network.receive.rate' THEN sum_value END) / NULLIF(SUM(CASE WHEN metric_name='process.network.receive.rate' THEN sample_count END),0),
+                    MAX(CASE WHEN metric_name='process.network.receive.rate' THEN max_value END),
+                    SUM(CASE WHEN metric_name='process.network.transmit.rate' THEN sum_value END) / NULLIF(SUM(CASE WHEN metric_name='process.network.transmit.rate' THEN sample_count END),0),
+                    MAX(CASE WHEN metric_name='process.network.transmit.rate' THEN max_value END),
+                    SUM(CASE WHEN metric_name='process.gpu.usage' THEN sum_value END) / NULLIF(SUM(CASE WHEN metric_name='process.gpu.usage' THEN sample_count END),0),
+                    MAX(CASE WHEN metric_name='process.gpu.usage' THEN max_value END)
+             FROM process_metric_rollups
+             WHERE resolution_seconds=?6 AND bucket_start_ms>=?1 AND bucket_start_ms<?2
+               AND pid=?3 AND process_start_time_seconds=?4
+             GROUP BY chart_bucket ORDER BY chart_bucket"
+        )?;
+        let points = statement
+            .query_map(
+                params![
+                    range.from_ms,
+                    range.to_ms,
+                    i64::from(process.pid),
+                    i64::try_from(process.process_start_time_seconds).unwrap_or(i64::MAX),
+                    bucket_span_ms,
+                    resolution
+                ],
+                |row| {
+                    Ok(DashboardProcessPoint {
+                        timestamp_ms: row.get(0)?,
+                        average_cpu_percent: row.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
+                        peak_cpu_percent: row.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
+                        average_memory_bytes: row.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+                        peak_memory_bytes: float_to_u64(
+                            row.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
+                        )
+                        .unwrap_or(0),
+                        average_disk_read_bytes_per_second: row
+                            .get::<_, Option<f64>>(5)?
+                            .unwrap_or(0.0),
+                        peak_disk_read_bytes_per_second: row
+                            .get::<_, Option<f64>>(6)?
+                            .unwrap_or(0.0),
+                        average_disk_write_bytes_per_second: row
+                            .get::<_, Option<f64>>(7)?
+                            .unwrap_or(0.0),
+                        peak_disk_write_bytes_per_second: row
+                            .get::<_, Option<f64>>(8)?
+                            .unwrap_or(0.0),
+                        average_network_receive_bytes_per_second: row.get(9)?,
+                        peak_network_receive_bytes_per_second: row.get(10)?,
+                        average_network_transmit_bytes_per_second: row.get(11)?,
+                        peak_network_transmit_bytes_per_second: row.get(12)?,
+                        average_gpu_usage_percent: row.get(13)?,
+                        peak_gpu_usage_percent: row.get(14)?,
+                    })
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        series.push(DashboardProcessSeries {
+            pid: process.pid,
+            process_start_time_seconds: process.process_start_time_seconds,
+            name: process.name,
+            cpu_rank: ranks[0],
+            memory_rank: ranks[1],
+            disk_read_rank: ranks[2],
+            disk_write_rank: ranks[3],
+            network_receive_rank: ranks[4],
+            network_transmit_rank: ranks[5],
+            gpu_rank: ranks[6],
+            points,
+        });
+    }
+    let memory_total = query_memory_total(connection, range)?;
+
+    Ok((bucket_span_ms, memory_total, series))
+}
+
+fn process_dimension_index(dimension: ProcessDimension) -> usize {
+    match dimension {
+        ProcessDimension::Cpu => 0,
+        ProcessDimension::Memory => 1,
+        ProcessDimension::DiskRead => 2,
+        ProcessDimension::DiskWrite => 3,
+        ProcessDimension::NetworkReceive => 4,
+        ProcessDimension::NetworkTransmit => 5,
+        ProcessDimension::Gpu => 6,
+    }
+}
+
+fn rollup_dimension_available(process: &ReportProcessSummary, dimension: ProcessDimension) -> bool {
+    match dimension {
+        ProcessDimension::NetworkReceive => process.peak_network_receive_bytes_per_second.is_some(),
+        ProcessDimension::NetworkTransmit => {
+            process.peak_network_transmit_bytes_per_second.is_some()
+        }
+        ProcessDimension::Gpu => process.peak_gpu_usage_percent.is_some(),
+        _ => true,
+    }
+}
+
+fn rollup_dimension_value(process: &ReportProcessSummary, dimension: ProcessDimension) -> f64 {
+    match dimension {
+        ProcessDimension::Cpu => process.peak_cpu_percent,
+        ProcessDimension::Memory => process.peak_memory_bytes as f64,
+        ProcessDimension::DiskRead => process.peak_disk_read_bytes_per_second,
+        ProcessDimension::DiskWrite => process.peak_disk_write_bytes_per_second,
+        ProcessDimension::NetworkReceive => {
+            process.peak_network_receive_bytes_per_second.unwrap_or(0.0)
+        }
+        ProcessDimension::NetworkTransmit => process
+            .peak_network_transmit_bytes_per_second
+            .unwrap_or(0.0),
+        ProcessDimension::Gpu => process.peak_gpu_usage_percent.unwrap_or(0.0),
+    }
 }
 
 fn process_chart_bucket_span_ms(range: ReportRange) -> i64 {
@@ -513,8 +883,13 @@ fn process_coverage(
     range: ReportRange,
 ) -> Result<(Option<i64>, Option<i64>)> {
     Ok(connection.query_row(
-        "SELECT MIN(collected_at_ms), MAX(collected_at_ms)
-         FROM process_samples WHERE collected_at_ms >= ?1 AND collected_at_ms < ?2",
+        "SELECT MIN(timestamp_ms), MAX(timestamp_ms) FROM (
+           SELECT collected_at_ms AS timestamp_ms FROM process_samples
+           WHERE collected_at_ms >= ?1 AND collected_at_ms < ?2
+           UNION ALL
+           SELECT bucket_start_ms FROM process_metric_rollups
+           WHERE bucket_start_ms >= ?1 AND bucket_start_ms < ?2
+         )",
         params![range.from_ms, range.to_ms],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?)

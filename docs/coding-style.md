@@ -114,8 +114,10 @@ Documentation MUST distinguish implemented behavior from `planned — no schema 
 - A batch's raw metric/process rows, collector capabilities, anomaly event changes, metric/process
   evidence, and next rule states MUST commit in one transaction; the live engine MUST advance only
   after that commit.
-- External collector commands MUST use absolute executable paths, structured output, bounded
-  timeouts, and explicit unavailable/degraded states; they MUST NOT require privilege escalation.
+- External commands used by the normal collector MUST use absolute executable paths, structured
+  output, bounded timeouts, and explicit unavailable/degraded states; they MUST NOT require
+  privilege escalation. An explicitly installed privileged helper MUST be a separate executable
+  and communicate only through a bounded, freshness-checked, root-owned artifact.
 - Retention cleanup MUST NOT pass the watermark proving that the downstream rollup tier completed.
 - Maintenance work SHOULD use bounded bucket and row batches; automatic `VACUUM` MUST NOT run in
   the collection path.

@@ -107,6 +107,11 @@ pub struct ReportProcessSummary {
     pub name: String,
     pub peak_cpu_percent: f64,
     pub peak_memory_bytes: u64,
+    pub peak_disk_read_bytes_per_second: f64,
+    pub peak_disk_write_bytes_per_second: f64,
+    pub peak_network_receive_bytes_per_second: Option<f64>,
+    pub peak_network_transmit_bytes_per_second: Option<f64>,
+    pub peak_gpu_usage_percent: Option<f64>,
     pub sample_count: i64,
     pub first_seen_ms: i64,
     pub last_seen_ms: i64,
@@ -119,6 +124,16 @@ pub struct DashboardProcessPoint {
     pub peak_cpu_percent: f64,
     pub average_memory_bytes: f64,
     pub peak_memory_bytes: u64,
+    pub average_disk_read_bytes_per_second: f64,
+    pub peak_disk_read_bytes_per_second: f64,
+    pub average_disk_write_bytes_per_second: f64,
+    pub peak_disk_write_bytes_per_second: f64,
+    pub average_network_receive_bytes_per_second: Option<f64>,
+    pub peak_network_receive_bytes_per_second: Option<f64>,
+    pub average_network_transmit_bytes_per_second: Option<f64>,
+    pub peak_network_transmit_bytes_per_second: Option<f64>,
+    pub average_gpu_usage_percent: Option<f64>,
+    pub peak_gpu_usage_percent: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -128,6 +143,11 @@ pub struct DashboardProcessSeries {
     pub name: String,
     pub cpu_rank: Option<u8>,
     pub memory_rank: Option<u8>,
+    pub disk_read_rank: Option<u8>,
+    pub disk_write_rank: Option<u8>,
+    pub network_receive_rank: Option<u8>,
+    pub network_transmit_rank: Option<u8>,
+    pub gpu_rank: Option<u8>,
     pub points: Vec<DashboardProcessPoint>,
 }
 
@@ -495,15 +515,26 @@ fn render_processes(data: &ReportData, html: &mut String) {
     if data.processes.is_empty() {
         html.push_str("<p class=\"empty\">No retained process snapshots overlap this range.</p>");
     } else {
-        html.push_str("<table><thead><tr><th>Process</th><th>PID</th><th>Peak CPU</th><th>Peak memory</th><th>Observed</th></tr></thead><tbody>");
+        html.push_str("<table><thead><tr><th>Process</th><th>PID</th><th>Peak CPU</th><th>Peak memory</th><th>Peak disk read/write</th><th>Peak network in/out</th><th>Peak GPU</th><th>Observed</th></tr></thead><tbody>");
         for process in &data.processes {
             let _ = write!(
                 html,
-                "<tr><td>{}</td><td>{}</td><td>{:.2}%</td><td>{}</td><td>{}</td></tr>",
+                "<tr><td>{}</td><td>{}</td><td>{:.2}%</td><td>{}</td><td>{} / {}</td><td>{} / {}</td><td>{}</td><td>{}</td></tr>",
                 escape_html(&process.name),
                 process.pid,
                 process.peak_cpu_percent,
                 format_bytes(process.peak_memory_bytes),
+                format_rate(process.peak_disk_read_bytes_per_second),
+                format_rate(process.peak_disk_write_bytes_per_second),
+                process
+                    .peak_network_receive_bytes_per_second
+                    .map_or_else(|| "n/a".to_owned(), format_rate),
+                process
+                    .peak_network_transmit_bytes_per_second
+                    .map_or_else(|| "n/a".to_owned(), format_rate),
+                process
+                    .peak_gpu_usage_percent
+                    .map_or_else(|| "n/a".to_owned(), |value| format!("{value:.2}%")),
                 process.sample_count,
             );
         }
@@ -557,6 +588,10 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{bytes:.0} B")
     }
+}
+
+fn format_rate(bytes_per_second: f64) -> String {
+    format!("{}/s", format_bytes(bytes_per_second.max(0.0) as u64))
 }
 
 fn format_duration_ms(milliseconds: i64) -> String {
