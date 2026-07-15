@@ -12,6 +12,13 @@ use anyhow::{Context, Result, bail};
 use crate::{AppConfig, config::LoggingConfig};
 
 pub const SERVICE_LABEL: &str = "com.simple-profiler.agent";
+const CLI_LAUNCHER_PREFIX: &str = "#!/bin/sh\n# Managed by Simple Profiler. Do not edit.\n";
+const LEGACY_CLI_LAUNCHER: &str = r#"#!/bin/sh
+
+exec "$HOME/Library/Application Support/SimpleProfiler/bin/simple-profiler" \
+  --config "$HOME/Library/Application Support/SimpleProfiler/config.toml" \
+  "$@"
+"#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServicePaths {
@@ -21,6 +28,7 @@ pub struct ServicePaths {
     pub database: PathBuf,
     pub logs: PathBuf,
     pub plist: PathBuf,
+    pub cli_launcher: PathBuf,
 }
 
 impl ServicePaths {
@@ -38,6 +46,7 @@ impl ServicePaths {
                 .join("Library")
                 .join("LaunchAgents")
                 .join(format!("{SERVICE_LABEL}.plist")),
+            cli_launcher: home.join(".local").join("bin").join("simple-profiler"),
             application_dir,
             logs,
         }
@@ -208,10 +217,17 @@ impl ServiceManager {
 }
 
 pub fn install_files(paths: &ServicePaths, source_binary: &Path) -> Result<()> {
+    ensure_cli_launcher_replaceable(paths)?;
     fs::create_dir_all(paths.binary.parent().context("binary has no parent")?)?;
     fs::create_dir_all(paths.database.parent().context("database has no parent")?)?;
     fs::create_dir_all(&paths.logs)?;
     fs::create_dir_all(paths.plist.parent().context("plist has no parent")?)?;
+    fs::create_dir_all(
+        paths
+            .cli_launcher
+            .parent()
+            .context("CLI launcher has no parent")?,
+    )?;
 
     copy_binary_atomically(source_binary, &paths.binary)?;
     if !paths.config.exists() {
@@ -228,10 +244,13 @@ pub fn install_files(paths: &ServicePaths, source_binary: &Path) -> Result<()> {
     }
     atomic_write(&paths.plist, render_plist(paths).as_bytes())?;
     set_mode(&paths.plist, 0o644)?;
+    atomic_write(&paths.cli_launcher, render_cli_launcher(paths).as_bytes())?;
+    set_mode(&paths.cli_launcher, 0o755)?;
     Ok(())
 }
 
 pub fn uninstall_files(paths: &ServicePaths, purge: bool) -> Result<()> {
+    remove_managed_cli_launcher(paths)?;
     remove_file_if_present(&paths.plist)?;
     remove_file_if_present(&paths.binary)?;
     if purge {
@@ -239,6 +258,14 @@ pub fn uninstall_files(paths: &ServicePaths, purge: bool) -> Result<()> {
         remove_dir_if_present(&paths.logs)?;
     }
     Ok(())
+}
+
+pub fn render_cli_launcher(paths: &ServicePaths) -> String {
+    format!(
+        "{CLI_LAUNCHER_PREFIX}\nexec {} --config {} \"$@\"\n",
+        shell_quote(&paths.binary),
+        shell_quote(&paths.config),
+    )
 }
 
 pub fn render_plist(paths: &ServicePaths) -> String {
@@ -331,6 +358,57 @@ fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
     fs::write(&temporary, content)?;
     fs::rename(temporary, path)?;
     Ok(())
+}
+
+fn ensure_cli_launcher_replaceable(paths: &ServicePaths) -> Result<()> {
+    let metadata = match fs::symlink_metadata(&paths.cli_launcher) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() {
+        if fs::read_link(&paths.cli_launcher)? == paths.binary {
+            return Ok(());
+        }
+    } else if metadata.is_file() {
+        let content = fs::read_to_string(&paths.cli_launcher)?;
+        if is_managed_cli_launcher(&content) {
+            return Ok(());
+        }
+    }
+    bail!(
+        "refusing to overwrite existing unmanaged CLI launcher at {}",
+        paths.cli_launcher.display()
+    )
+}
+
+fn remove_managed_cli_launcher(paths: &ServicePaths) -> Result<()> {
+    let metadata = match fs::symlink_metadata(&paths.cli_launcher) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let managed = if metadata.file_type().is_symlink() {
+        fs::read_link(&paths.cli_launcher)? == paths.binary
+    } else if metadata.is_file() {
+        fs::read_to_string(&paths.cli_launcher)
+            .map(|content| is_managed_cli_launcher(&content))
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    if managed {
+        remove_file_if_present(&paths.cli_launcher)?;
+    }
+    Ok(())
+}
+
+fn is_managed_cli_launcher(content: &str) -> bool {
+    content.starts_with(CLI_LAUNCHER_PREFIX) || content == LEGACY_CLI_LAUNCHER
+}
+
+fn shell_quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"))
 }
 
 fn remove_file_if_present(path: &Path) -> Result<()> {
@@ -436,6 +514,17 @@ mod tests {
     }
 
     #[test]
+    fn renders_a_managed_cli_launcher_with_shell_quoted_paths() {
+        let paths = ServicePaths::for_home(Path::new("/Users/Test's Home"));
+        let launcher = render_cli_launcher(&paths);
+
+        assert!(launcher.starts_with(CLI_LAUNCHER_PREFIX));
+        assert!(launcher.contains("'/Users/Test'\"'\"'s Home/Library/Application Support"));
+        assert!(launcher.contains("--config"));
+        assert!(launcher.ends_with("\"$@\"\n"));
+    }
+
+    #[test]
     fn installs_files_without_overwriting_an_existing_config() {
         let directory = tempdir().expect("temp dir");
         let home = directory.path().join("home");
@@ -464,6 +553,40 @@ mod tests {
                 & 0o777,
             0o600
         );
+        assert!(
+            fs::read_to_string(&paths.cli_launcher)
+                .expect("CLI launcher")
+                .starts_with(CLI_LAUNCHER_PREFIX)
+        );
+        assert_eq!(
+            fs::metadata(&paths.cli_launcher)
+                .expect("launcher metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+    }
+
+    #[test]
+    fn refuses_to_overwrite_an_unmanaged_cli_launcher() {
+        let directory = tempdir().expect("temp dir");
+        let home = directory.path().join("home");
+        let source = directory.path().join("source-binary");
+        fs::write(&source, "binary-v1").expect("source binary");
+        let paths = ServicePaths::for_home(&home);
+        fs::create_dir_all(paths.cli_launcher.parent().expect("launcher parent"))
+            .expect("launcher directory");
+        fs::write(&paths.cli_launcher, "user-owned\n").expect("foreign launcher");
+
+        let error = install_files(&paths, &source).expect_err("conflict must fail");
+
+        assert!(error.to_string().contains("refusing to overwrite"));
+        assert_eq!(
+            fs::read_to_string(&paths.cli_launcher).expect("foreign launcher"),
+            "user-owned\n"
+        );
+        assert!(!paths.binary.exists());
     }
 
     #[test]
@@ -492,6 +615,7 @@ mod tests {
         fs::write(paths.logs.join("simple-profiler.log"), "log").expect("log");
 
         uninstall_files(&paths, false).expect("normal uninstall");
+        assert!(!paths.cli_launcher.exists());
         assert!(!paths.binary.exists());
         assert!(!paths.plist.exists());
         assert!(paths.config.exists());
@@ -501,6 +625,22 @@ mod tests {
         uninstall_files(&paths, true).expect("purge");
         assert!(!paths.application_dir.exists());
         assert!(!paths.logs.exists());
+    }
+
+    #[test]
+    fn uninstall_preserves_an_unmanaged_cli_launcher() {
+        let directory = tempdir().expect("temp dir");
+        let paths = ServicePaths::for_home(directory.path());
+        fs::create_dir_all(paths.cli_launcher.parent().expect("launcher parent"))
+            .expect("launcher directory");
+        fs::write(&paths.cli_launcher, "user-owned\n").expect("foreign launcher");
+
+        uninstall_files(&paths, false).expect("uninstall");
+
+        assert_eq!(
+            fs::read_to_string(&paths.cli_launcher).expect("foreign launcher"),
+            "user-owned\n"
+        );
     }
 
     #[cfg(target_os = "macos")]

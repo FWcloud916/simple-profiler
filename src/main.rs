@@ -383,6 +383,7 @@ fn handle_service(action: ServiceCommand) -> Result<()> {
             println!("config: {}", manager.paths().config.display());
             println!("database: {}", manager.paths().database.display());
             println!("logs: {}", manager.paths().logs.display());
+            println!("command: {}", manager.paths().cli_launcher.display());
         }
         ServiceCommand::Start => {
             manager.start()?;
