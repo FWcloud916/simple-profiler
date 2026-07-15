@@ -1,12 +1,11 @@
 # Simple Profiler — Progress
 
-> **Last session:** 2026-07-15 · commit `186700f` · tests: passing (69)
+> **Last session:** 2026-07-15 · commit `b39e737` · tests: passing (69)
 
 ## Now (WIP = 1)
 
-No feature is active. Chart value inspection and ranked top-process trend lines are implemented;
-upgrading the installed binary to expose them through the managed launcher requires explicit user
-approval.
+No feature is active. The installed LaunchAgent and managed dashboard launcher now run the chart
+inspection and ranked top-process trend release; background collection remains healthy.
 
 ## Feature list
 
@@ -132,6 +131,10 @@ approval.
   the top-three union per dimension, and cap each line near 360 points. The phase passes 69 tests,
   JavaScriptCore syntax, rustfmt, strict Clippy, release build, and live one-hour API verification;
   five unique series returned with at most 185 points in the observed window.
+- After explicit user approval, the installed LaunchAgent was upgraded to the chart-inspection
+  release and restarted as PID 73098. The managed dashboard served tooltip/process-line assets and
+  returned CPU Top 3 plus memory Top 3 as five unique series with at most 184 points; system and
+  process sample timestamps continued advancing after the temporary dashboard stopped.
 
 ## Blockers
 
@@ -139,11 +142,9 @@ None.
 
 ## Next steps
 
-1. After explicit approval, upgrade the installed binary to the chart-inspection release and verify
-   the managed dashboard serves tooltip and process-series assets.
-2. Design NVIDIA and AMD adapters without weakening field-level capability semantics.
-3. Decide whether GPU anomaly rules are useful after observing real retained workloads.
-4. Inspect the first naturally occurring CPU or memory anomaly to validate its preserved process
+1. Design NVIDIA and AMD adapters without weakening field-level capability semantics.
+2. Decide whether GPU anomaly rules are useful after observing real retained workloads.
+3. Inspect the first naturally occurring CPU or memory anomaly to validate its preserved process
    evidence in reports and the dashboard.
 
 ## Decision log
