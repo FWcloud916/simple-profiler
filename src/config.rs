@@ -11,6 +11,7 @@ pub struct AppConfig {
     pub channel_capacity: usize,
     pub sampling: SamplingConfig,
     pub retention: RetentionConfig,
+    pub logging: LoggingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +26,25 @@ impl Default for SamplingConfig {
         Self {
             disk_capacity_interval_seconds: 60,
             suppress_idle_io: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoggingConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<PathBuf>,
+    pub max_bytes: u64,
+    pub retained_files: usize,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            file: None,
+            max_bytes: 10 * 1024 * 1024,
+            retained_files: 5,
         }
     }
 }
@@ -63,6 +83,7 @@ impl Default for AppConfig {
             channel_capacity: 128,
             sampling: SamplingConfig::default(),
             retention: RetentionConfig::default(),
+            logging: LoggingConfig::default(),
         }
     }
 }
@@ -86,6 +107,9 @@ impl AppConfig {
         }
         if self.sampling.disk_capacity_interval_seconds == 0 {
             bail!("sampling.disk_capacity_interval_seconds must be greater than zero");
+        }
+        if self.logging.max_bytes == 0 || self.logging.retained_files == 0 {
+            bail!("logging.max_bytes and logging.retained_files must be greater than zero");
         }
         if self.retention.raw_hours == 0
             || self.retention.minute_days == 0

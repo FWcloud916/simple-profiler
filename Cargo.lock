@@ -637,6 +637,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
+ "libc",
  "rusqlite",
  "serde",
  "sysinfo",

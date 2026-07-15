@@ -3,11 +3,12 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use tokio::{sync::mpsc, time::MissedTickBehavior};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     collector::{CollectionContext, Collector, DiskCollector, NetworkCollector, SystemCollector},
     config::AppConfig,
+    instance::InstanceLock,
     storage::spawn_writer,
 };
 
@@ -32,6 +33,7 @@ async fn run_with_collectors(
     mut collectors: Vec<Box<dyn Collector>>,
 ) -> Result<()> {
     config.validate()?;
+    let _instance_lock = InstanceLock::acquire(&config.database_path)?;
     let (sender, receiver) = mpsc::channel(config.channel_capacity);
     let writer = spawn_writer(&config.database_path, config.retention.clone(), receiver);
     let mut interval = tokio::time::interval(Duration::from_secs(config.interval_seconds));
@@ -45,6 +47,8 @@ async fn run_with_collectors(
         "profiler started"
     );
 
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
     loop {
         tokio::select! {
             _ = interval.tick() => {
@@ -70,14 +74,14 @@ async fn run_with_collectors(
                     sender.send(cycle_batch).await.context("storage writer stopped")?;
                 }
                 collected_cycles += 1;
-                info!(collected_cycles, metric_count, "collection cycle completed");
+                debug!(collected_cycles, metric_count, "collection cycle completed");
 
                 if sample_limit.is_some_and(|limit| collected_cycles >= limit) {
                     break;
                 }
             }
-            signal = tokio::signal::ctrl_c() => {
-                signal.context("failed to listen for shutdown signal")?;
+            signal = &mut shutdown => {
+                signal?;
                 info!("shutdown signal received");
                 break;
             }
@@ -88,6 +92,30 @@ async fn run_with_collectors(
     writer.await.context("storage writer task panicked")??;
     info!("profiler stopped");
     Ok(())
+}
+
+async fn shutdown_signal() -> Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut terminate =
+            signal(SignalKind::terminate()).context("failed to listen for SIGTERM")?;
+        tokio::select! {
+            signal = tokio::signal::ctrl_c() => {
+                signal.context("failed to listen for shutdown signal")?;
+            }
+            _ = terminate.recv() => {}
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .context("failed to listen for shutdown signal")
+    }
 }
 
 #[cfg(test)]
