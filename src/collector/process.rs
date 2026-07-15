@@ -30,7 +30,10 @@ struct NetworkTotals {
 #[derive(Debug, Clone, Copy, Deserialize)]
 struct GpuTotal {
     pid: u32,
-    gpu_time_ns: u64,
+    #[serde(default)]
+    gpu_time_ns: Option<u64>,
+    #[serde(default)]
+    gpu_usage_percent: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -187,7 +190,12 @@ impl ProcessCollector {
             .await
             {
                 Ok(totals) => {
-                    apply_gpu_deltas(&mut candidates, &totals, &mut self.previous_gpu, elapsed);
+                    apply_gpu_measurements(
+                        &mut candidates,
+                        &totals,
+                        &mut self.previous_gpu,
+                        elapsed,
+                    );
                     collection.capabilities.push(capability(
                         "process.gpu_time",
                         CapabilityState::Available,
@@ -371,7 +379,7 @@ async fn collect_gpu_totals(
     path: &std::path::Path,
     max_age_seconds: u64,
     now_ms: i64,
-) -> Result<HashMap<u32, u64>, String> {
+) -> Result<HashMap<u32, GpuTotal>, String> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let metadata = std::fs::metadata(&path)
@@ -400,19 +408,32 @@ async fn collect_gpu_totals(
         {
             return Err("GPU snapshot is stale or has a future timestamp".to_owned());
         }
-        Ok(snapshot
-            .processes
-            .into_iter()
-            .map(|row| (row.pid, row.gpu_time_ns))
-            .collect())
+        let mut totals = HashMap::new();
+        for row in snapshot.processes {
+            let valid_usage = row
+                .gpu_usage_percent
+                .filter(|value| value.is_finite() && *value >= 0.0);
+            if row.gpu_time_ns.is_none() && valid_usage.is_none() {
+                return Err("GPU snapshot row contained no valid measurement".to_owned());
+            }
+            totals.insert(
+                row.pid,
+                GpuTotal {
+                    gpu_time_ns: row.gpu_time_ns,
+                    gpu_usage_percent: valid_usage,
+                    ..row
+                },
+            );
+        }
+        Ok(totals)
     })
     .await
     .map_err(|error| format!("GPU snapshot task failed: {error}"))?
 }
 
-fn apply_gpu_deltas(
+fn apply_gpu_measurements(
     candidates: &mut [ProcessCandidate],
-    totals: &HashMap<u32, u64>,
+    totals: &HashMap<u32, GpuTotal>,
     previous: &mut HashMap<(u32, u64), u64>,
     elapsed: Duration,
 ) {
@@ -423,13 +444,20 @@ fn apply_gpu_deltas(
         let Some(total) = totals.get(&candidate.pid).copied() else {
             continue;
         };
-        next.insert(key, total);
-        let Some(old) = previous.get(&key) else {
-            continue;
-        };
-        let delta = total.saturating_sub(*old);
-        candidate.gpu_time_ns = Some(delta);
-        candidate.gpu_usage_percent = Some((delta as f64 / elapsed_ns * 100.0).clamp(0.0, 100.0));
+        if let Some(usage) = total.gpu_usage_percent {
+            candidate.gpu_usage_percent = Some(usage.clamp(0.0, 100.0));
+        }
+        if let Some(gpu_time_ns) = total.gpu_time_ns {
+            next.insert(key, gpu_time_ns);
+            if let Some(old) = previous.get(&key) {
+                let delta = gpu_time_ns.saturating_sub(*old);
+                candidate.gpu_time_ns = Some(delta);
+                if candidate.gpu_usage_percent.is_none() {
+                    candidate.gpu_usage_percent =
+                        Some((delta as f64 / elapsed_ns * 100.0).clamp(0.0, 100.0));
+                }
+            }
+        }
     }
     *previous = next;
 }
@@ -773,5 +801,28 @@ mod tests {
         );
         assert_eq!(candidates[0].network_receive_bytes, Some(0));
         assert_eq!(candidates[0].network_transmit_bytes, Some(0));
+    }
+
+    #[test]
+    fn applies_direct_gpu_usage_without_a_warmup_snapshot() {
+        let mut candidates = vec![candidate(7, 10, 1.0, 1)];
+        let totals = HashMap::from([(
+            7,
+            GpuTotal {
+                pid: 7,
+                gpu_time_ns: None,
+                gpu_usage_percent: Some(12.5),
+            },
+        )]);
+        let mut previous = HashMap::new();
+        apply_gpu_measurements(
+            &mut candidates,
+            &totals,
+            &mut previous,
+            Duration::from_secs(15),
+        );
+        assert_eq!(candidates[0].gpu_usage_percent, Some(12.5));
+        assert_eq!(candidates[0].gpu_time_ns, None);
+        assert!(previous.is_empty());
     }
 }

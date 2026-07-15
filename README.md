@@ -123,7 +123,7 @@ and working directories are never collected.
 
 The normal profiler remains a user LaunchAgent. The separately built
 `simple-profiler-gpu-helper` is a one-shot root utility intended for a root LaunchDaemon: it reads
-structured `powermetrics` output and atomically replaces
+the `powermetrics` process table, converts its `GPU ms/s` rate to usage percentage, and atomically replaces
 `/var/run/simple-profiler/process-gpu.json`. The user process accepts that file only when it is
 root-owned, not group/world writable, at most 1 MiB, and fresh. Build it with:
 
@@ -136,6 +136,8 @@ is the LaunchDaemon template. Installing the binary/plist and loading the Launch
 system-wide privileged state and is intentionally not automated; do it only after explicit
 approval. After installation, set
 `gpu_snapshot_path = "/var/run/simple-profiler/process-gpu.json"` under `[process]`.
+An idle sample is a valid empty process list; it means the provider is healthy but no process used
+measurable GPU time during that sample.
 
 ### Generate a diagnostic report
 

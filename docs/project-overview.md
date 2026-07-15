@@ -281,8 +281,8 @@ status output. The optional dashboard accepts HTTP only from its exact `127.0.0.
 not load or call remote services. Anomaly detection reads only local metric batches and
 configuration; it makes no notification or external network call. The macOS GPU adapter invokes
 local `/usr/sbin/ioreg`; process network attribution invokes `/usr/bin/nettop`. An optional
-separately installed root helper invokes `powermetrics` and publishes only PID/cumulative GPU-time
-JSON through a validated root-owned file. NVIDIA and AMD adapter choices are TBD.
+separately installed root helper invokes `powermetrics` and publishes only PID/GPU-usage JSON from
+the process table through a validated root-owned file. NVIDIA and AMD adapter choices are TBD.
 
 ## 9. Database / Data Stores
 

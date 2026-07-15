@@ -1,13 +1,12 @@
-use std::{collections::BTreeMap, io::Cursor, path::PathBuf, process::Command};
+use std::{collections::BTreeMap, path::PathBuf, process::Command};
 
 use anyhow::{Context, Result, bail};
-use plist::Value;
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
 struct GpuTotal {
     pid: u32,
-    gpu_time_ns: u64,
+    gpu_usage_percent: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -23,7 +22,7 @@ fn main() -> Result<()> {
     }
     let output_path = helper_output_path()?;
     let output = Command::new("/usr/bin/powermetrics")
-        .args(["-n", "1", "--show-process-gpu", "--format", "plist"])
+        .args(["-n", "1", "--show-process-gpu", "--format", "text"])
         .output()
         .context("failed to run /usr/bin/powermetrics")?;
     if !output.status.success() {
@@ -67,95 +66,47 @@ fn write_snapshot(path: &std::path::Path, source: &[u8]) -> Result<()> {
 }
 
 fn parse_powermetrics(source: &[u8]) -> Result<Vec<GpuTotal>> {
+    let source = std::str::from_utf8(source).context("powermetrics output was not UTF-8")?;
+    let mut lines = source.lines();
+    let header = lines
+        .find(|line| line.trim_start().starts_with("Name") && line.contains("GPU ms/s"))
+        .context("powermetrics returned no per-process GPU column")?;
+    if !header.contains("CPU ms/s") || !header.contains("User%") {
+        bail!("powermetrics process table had an unsupported column layout");
+    }
+
     let mut totals = BTreeMap::new();
-    let mut parsed = false;
-    for document in source
-        .split(|byte| *byte == 0)
-        .filter(|part| !part.is_empty())
-    {
-        let value = Value::from_reader(Cursor::new(document))
-            .context("failed to parse powermetrics property list")?;
-        parsed = true;
-        collect_process_gpu(&value, &mut totals);
+    for line in lines.take_while(|line| !line.trim().is_empty()) {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        // The text table ends with PID, CPU, user, two deadline, two wakeup, and GPU fields.
+        // Reading that fixed numeric tail avoids treating spaces in process names as separators.
+        if fields.len() < 8 {
+            continue;
+        }
+        let tail = &fields[fields.len() - 8..];
+        let Ok(pid) = tail[0].parse::<u32>() else {
+            continue;
+        };
+        let Ok(gpu_ms_per_second) = tail[7].parse::<f64>() else {
+            continue;
+        };
+        if !gpu_ms_per_second.is_finite() || gpu_ms_per_second <= 0.0 {
+            continue;
+        }
+        let gpu_usage_percent = (gpu_ms_per_second / 10.0).clamp(0.0, 100.0);
+        totals
+            .entry(pid)
+            .and_modify(|total: &mut f64| *total = total.max(gpu_usage_percent))
+            .or_insert(gpu_usage_percent);
     }
-    if !parsed {
-        bail!("powermetrics returned no property list");
-    }
-    if totals.is_empty() {
-        bail!("powermetrics returned no per-process GPU time fields");
-    }
+
     Ok(totals
         .into_iter()
-        .map(|(pid, gpu_time_ns)| GpuTotal { pid, gpu_time_ns })
+        .map(|(pid, gpu_usage_percent)| GpuTotal {
+            pid,
+            gpu_usage_percent,
+        })
         .collect())
-}
-
-fn collect_process_gpu(value: &Value, totals: &mut BTreeMap<u32, u64>) {
-    match value {
-        Value::Array(values) => values
-            .iter()
-            .for_each(|value| collect_process_gpu(value, totals)),
-        Value::Dictionary(dictionary) => {
-            let pid = dictionary.iter().find_map(|(key, value)| {
-                let key = normalize_key(key);
-                matches!(key.as_str(), "pid" | "processid" | "processidentifier")
-                    .then(|| {
-                        numeric_value(value).and_then(|value| u32::try_from(value as u64).ok())
-                    })
-                    .flatten()
-            });
-            let gpu_time = dictionary.iter().find_map(|(key, value)| {
-                let normalized = normalize_key(key);
-                (normalized.contains("gpu")
-                    && (normalized.contains("time") || normalized.contains("runtime")))
-                .then(|| time_as_ns(key, value))
-                .flatten()
-            });
-            if let (Some(pid), Some(gpu_time_ns)) = (pid, gpu_time) {
-                totals
-                    .entry(pid)
-                    .and_modify(|total| *total = (*total).max(gpu_time_ns))
-                    .or_insert(gpu_time_ns);
-            }
-            dictionary
-                .values()
-                .for_each(|value| collect_process_gpu(value, totals));
-        }
-        _ => {}
-    }
-}
-
-fn normalize_key(key: &str) -> String {
-    key.chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-fn numeric_value(value: &Value) -> Option<f64> {
-    match value {
-        Value::Integer(value) => value.as_unsigned().map(|value| value as f64),
-        Value::Real(value) => Some(*value),
-        _ => None,
-    }
-}
-
-fn time_as_ns(key: &str, value: &Value) -> Option<u64> {
-    let value = numeric_value(value)?;
-    if !value.is_finite() || value < 0.0 {
-        return None;
-    }
-    let key = normalize_key(key);
-    let multiplier = if key.ends_with("ns") || key.contains("nanosecond") {
-        1.0
-    } else if key.ends_with("us") || key.contains("microsecond") {
-        1_000.0
-    } else if key.ends_with("ms") || key.contains("millisecond") {
-        1_000_000.0
-    } else {
-        1_000_000_000.0
-    };
-    Some((value * multiplier).min(u64::MAX as f64).round() as u64)
 }
 
 #[cfg(test)]
@@ -163,14 +114,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_nested_process_gpu_time_with_explicit_units() {
-        let source = br#"<?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0"><dict><key>processes</key><array><dict>
-        <key>pid</key><integer>42</integer><key>gpu_time_ms</key><real>1.5</real>
-        </dict></array></dict></plist>"#;
-        let totals = parse_powermetrics(source).expect("plist");
+    fn parses_real_text_table_and_process_names_with_spaces() {
+        let source = br#"*** Running tasks ***
+
+Name                               ID     CPU ms/s  User%  Deadlines (<2 ms, 2-5 ms)  Wakeups (Intr, Pkg idle)  GPU ms/s
+Google Chrome Helper (Renderer)    42     9.00      50.00  0.00    0.00               1.00    0.00              125.50
+DEAD_TASKS                         -1     1.00      50.00  0.00    0.00               1.00    0.00              99.00
+
+**** Processor usage ****
+"#;
+        let totals = parse_powermetrics(source).expect("text table");
         assert_eq!(totals[0].pid, 42);
-        assert_eq!(totals[0].gpu_time_ns, 1_500_000);
+        assert_eq!(totals[0].gpu_usage_percent, 12.55);
+    }
+
+    #[test]
+    fn accepts_an_idle_sample_as_available() {
+        let source = br#"Name ID CPU ms/s User% GPU ms/s
+idle 7 0.00 0.00 0.00 0.00 0.00 0.00 0.00
+
+"#;
+        assert!(parse_powermetrics(source).expect("idle table").is_empty());
     }
 }
