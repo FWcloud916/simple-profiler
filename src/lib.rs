@@ -1,3 +1,5 @@
+pub mod anomaly;
+mod anomaly_storage;
 pub mod collector;
 pub mod config;
 pub mod instance;

@@ -18,3 +18,52 @@ maintenance_interval_seconds = 60
 late_arrival_grace_seconds = 30
 delete_batch_rows = 10000
 rollup_batch_buckets = 60
+
+[anomaly]
+enabled = true
+event_retention_days = 365
+prelude_minutes = 5
+evidence_interval_seconds = 60
+delete_batch_rows = 1000
+
+[[anomaly.rules]]
+id = "cpu-sustained-high"
+metric_name = "cpu.total.usage"
+warning_threshold = 90.0
+critical_threshold = 97.0
+recovery_threshold = 75.0
+trigger_seconds = 120
+critical_trigger_seconds = 60
+recovery_seconds = 60
+min_samples = 12
+critical_min_samples = 12
+recovery_min_samples = 12
+max_sample_gap_seconds = 15
+
+[[anomaly.rules]]
+id = "memory-pressure"
+metric_name = "memory.usage"
+warning_threshold = 90.0
+critical_threshold = 95.0
+recovery_threshold = 85.0
+trigger_seconds = 300
+critical_trigger_seconds = 120
+recovery_seconds = 120
+min_samples = 60
+critical_min_samples = 24
+recovery_min_samples = 24
+max_sample_gap_seconds = 15
+
+[[anomaly.rules]]
+id = "disk-space-low"
+metric_name = "disk.space.usage"
+warning_threshold = 90.0
+critical_threshold = 95.0
+recovery_threshold = 88.0
+trigger_seconds = 60
+critical_trigger_seconds = 60
+recovery_seconds = 60
+min_samples = 2
+critical_min_samples = 2
+recovery_min_samples = 2
+max_sample_gap_seconds = 90

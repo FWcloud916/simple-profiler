@@ -47,10 +47,40 @@ enum Command {
         database: Option<PathBuf>,
     },
 
+    /// List or inspect detected system anomalies.
+    Events {
+        #[command(subcommand)]
+        action: EventsCommand,
+    },
+
     /// Install and manage the macOS background service.
     Service {
         #[command(subcommand)]
         action: ServiceCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum EventsCommand {
+    /// List recent anomaly events.
+    List {
+        /// Show only events that are still open.
+        #[arg(long)]
+        open: bool,
+        /// Maximum number of events to show.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Override the SQLite database path.
+        #[arg(long)]
+        database: Option<PathBuf>,
+    },
+    /// Show one event and its preserved evidence samples.
+    Show {
+        /// Event identifier shown by `events list`.
+        id: i64,
+        /// Override the SQLite database path.
+        #[arg(long)]
+        database: Option<PathBuf>,
     },
 }
 
@@ -126,9 +156,108 @@ async fn main() -> Result<()> {
                     .as_deref()
                     .unwrap_or("not run")
             );
+            println!(
+                "anomalies: warning={}, critical={}, latest={}",
+                status.open_warning_count,
+                status.open_critical_count,
+                format_time(status.latest_event_ms)
+            );
             Ok(())
         }
+        Command::Events { action } => handle_events(action, &mut config),
         Command::Service { action } => handle_service(action),
+    }
+}
+
+fn handle_events(action: EventsCommand, config: &mut AppConfig) -> Result<()> {
+    match action {
+        EventsCommand::List {
+            open,
+            limit,
+            database,
+        } => {
+            if !(1..=1_000).contains(&limit) {
+                anyhow::bail!("--limit must be between 1 and 1000");
+            }
+            if let Some(database) = database {
+                config.database_path = database;
+            }
+            let storage = Storage::open(&config.database_path)?;
+            let events = storage.list_events(open, limit)?;
+            if events.is_empty() {
+                println!("no anomaly events");
+                return Ok(());
+            }
+            for event in events {
+                let resource = if event.resource.is_empty() {
+                    "system"
+                } else {
+                    &event.resource
+                };
+                println!(
+                    "#{} {} {} {} {} peak={:.2} started={} ended={}",
+                    event.id,
+                    event.status,
+                    event.severity,
+                    event.metric_name,
+                    resource,
+                    event.peak_value,
+                    format_time(Some(event.started_at_ms)),
+                    format_time(event.ended_at_ms)
+                );
+            }
+            Ok(())
+        }
+        EventsCommand::Show { id, database } => {
+            if let Some(database) = database {
+                config.database_path = database;
+            }
+            let storage = Storage::open(&config.database_path)?;
+            let Some(event) = storage.event(id)? else {
+                anyhow::bail!("anomaly event #{id} was not found");
+            };
+            let resource = if event.summary.resource.is_empty() {
+                "system"
+            } else {
+                &event.summary.resource
+            };
+            println!("event: #{}", event.summary.id);
+            println!("rule: {}", event.summary.rule_id);
+            println!(
+                "metric: {} ({resource}, {})",
+                event.summary.metric_name, event.unit
+            );
+            println!("state: {} {}", event.summary.status, event.summary.severity);
+            println!(
+                "time: {} -> {} (detected {})",
+                format_time(Some(event.summary.started_at_ms)),
+                format_time(event.summary.ended_at_ms),
+                format_time(Some(event.detected_at_ms))
+            );
+            println!(
+                "thresholds: warning={:.2}, critical={:.2}, recovery={:.2}",
+                event.warning_threshold, event.critical_threshold, event.recovery_threshold
+            );
+            println!(
+                "values: peak={:.2} at {}, last={:.2} at {}, samples={}, gaps={}",
+                event.summary.peak_value,
+                format_time(Some(event.summary.peak_at_ms)),
+                event.last_value,
+                format_time(Some(event.last_sample_ms)),
+                event.sample_count,
+                event.data_gap_count
+            );
+            println!("evidence:");
+            for evidence in event.evidence {
+                println!(
+                    "  {} {:>10.2} {}",
+                    format_time(Some(evidence.collected_at_ms)),
+                    evidence.value,
+                    evidence.kind
+                );
+            }
+            Ok(())
+        }
     }
 }
 
@@ -208,6 +337,10 @@ fn print_service_data_status(manager: &ServiceManager) -> Result<()> {
             .last_maintenance_result
             .as_deref()
             .unwrap_or("not run")
+    );
+    println!(
+        "open anomalies: warning={}, critical={}",
+        status.open_warning_count, status.open_critical_count
     );
     Ok(())
 }

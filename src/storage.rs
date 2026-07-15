@@ -11,9 +11,16 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::warn;
 
-use crate::{config::RetentionConfig, model::MetricBatch};
+use crate::{
+    anomaly::AnomalyEngine,
+    anomaly_storage,
+    config::{AnomalyConfig, RetentionConfig},
+    model::MetricBatch,
+};
 
-const CURRENT_SCHEMA_VERSION: i64 = 2;
+pub use crate::anomaly_storage::{EventDetail, EventEvidence, EventSummary};
+
+const CURRENT_SCHEMA_VERSION: i64 = 3;
 const MINUTE_MS: i64 = 60_000;
 const QUARTER_HOUR_MS: i64 = 900_000;
 const MINUTE_WATERMARK: &str = "rollup_60_watermark_ms";
@@ -56,6 +63,59 @@ CREATE TABLE IF NOT EXISTS maintenance_state (
     value_integer INTEGER,
     value_text    TEXT
 );
+
+CREATE TABLE IF NOT EXISTS anomaly_events (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id              TEXT NOT NULL,
+    collector            TEXT NOT NULL,
+    metric_name          TEXT NOT NULL,
+    resource             TEXT NOT NULL DEFAULT '',
+    unit                 TEXT NOT NULL,
+    status               TEXT NOT NULL,
+    severity             TEXT NOT NULL,
+    started_at_ms        INTEGER NOT NULL,
+    detected_at_ms       INTEGER NOT NULL,
+    ended_at_ms          INTEGER,
+    warning_threshold    REAL NOT NULL,
+    critical_threshold   REAL NOT NULL,
+    recovery_threshold   REAL NOT NULL,
+    peak_value           REAL NOT NULL,
+    peak_at_ms           INTEGER NOT NULL,
+    last_value           REAL NOT NULL,
+    last_sample_ms       INTEGER NOT NULL,
+    sample_count         INTEGER NOT NULL,
+    data_gap_count       INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS anomaly_states (
+    rule_id              TEXT NOT NULL,
+    resource             TEXT NOT NULL DEFAULT '',
+    phase                TEXT NOT NULL,
+    severity             TEXT,
+    pending_severity     TEXT,
+    pending_since_ms     INTEGER,
+    pending_samples      INTEGER NOT NULL,
+    critical_since_ms    INTEGER,
+    critical_samples     INTEGER NOT NULL,
+    recovery_since_ms    INTEGER,
+    recovery_samples     INTEGER NOT NULL,
+    event_id             INTEGER,
+    last_sample_ms       INTEGER,
+    last_value           REAL,
+    peak_value           REAL,
+    peak_at_ms           INTEGER,
+    last_evidence_ms     INTEGER,
+    data_gap_count       INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (rule_id, resource)
+);
+
+CREATE TABLE IF NOT EXISTS anomaly_event_evidence (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id             INTEGER NOT NULL,
+    collected_at_ms      INTEGER NOT NULL,
+    value                REAL NOT NULL,
+    kind                 TEXT NOT NULL
+);
 "#;
 
 const INDEX_SCHEMA: &str = r#"
@@ -67,6 +127,12 @@ CREATE INDEX IF NOT EXISTS idx_metric_samples_name_resource_time_ms
     ON metric_samples(metric_name, resource, collected_at_ms);
 CREATE INDEX IF NOT EXISTS idx_metric_rollups_resolution_time
     ON metric_rollups(resolution_seconds, bucket_start_ms);
+CREATE INDEX IF NOT EXISTS idx_anomaly_events_status_started
+    ON anomaly_events(status, started_at_ms);
+CREATE INDEX IF NOT EXISTS idx_anomaly_events_severity_started
+    ON anomaly_events(severity, started_at_ms);
+CREATE INDEX IF NOT EXISTS idx_anomaly_event_evidence_event_time
+    ON anomaly_event_evidence(event_id, collected_at_ms);
 "#;
 
 pub struct Storage {
@@ -94,6 +160,9 @@ pub struct StorageStatus {
     pub quarter_hour_watermark_ms: Option<i64>,
     pub last_maintenance_ms: Option<i64>,
     pub last_maintenance_result: Option<String>,
+    pub open_warning_count: i64,
+    pub open_critical_count: i64,
+    pub latest_event_ms: Option<i64>,
 }
 
 impl Storage {
@@ -108,8 +177,12 @@ impl Storage {
 
         let mut connection = Connection::open(path)
             .with_context(|| format!("failed to open SQLite database {}", path.display()))?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "busy_timeout", 5_000_i64)?;
+        let journal_mode: String =
+            connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+        if !journal_mode.eq_ignore_ascii_case("wal") {
+            connection.pragma_update(None, "journal_mode", "WAL")?;
+        }
         migrate(&mut connection)?;
         Ok(Self {
             connection,
@@ -139,6 +212,19 @@ impl Storage {
         }
         transaction.commit()?;
         Ok(())
+    }
+
+    pub fn load_anomaly_engine(&self, config: &AnomalyConfig) -> Result<AnomalyEngine> {
+        anomaly_storage::load_engine(&self.connection, config)
+    }
+
+    pub fn insert_batch_with_anomalies(
+        &mut self,
+        batch: &MetricBatch,
+        engine: &mut AnomalyEngine,
+        config: &AnomalyConfig,
+    ) -> Result<()> {
+        anomaly_storage::insert_batch(&mut self.connection, batch, engine, config)
     }
 
     pub fn run_maintenance(
@@ -180,6 +266,55 @@ impl Storage {
         Ok(())
     }
 
+    pub fn run_maintenance_with_anomalies(
+        &mut self,
+        retention: &RetentionConfig,
+        anomaly: &AnomalyConfig,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let now_ms = now.timestamp_millis();
+        let transaction = self.connection.transaction()?;
+        let minute_watermark = roll_up_raw_minutes(&transaction, retention, now_ms)?;
+        let quarter_watermark =
+            roll_up_quarter_hours(&transaction, retention, now_ms, minute_watermark)?;
+        let deleted_raw = delete_raw(&transaction, retention, now_ms, minute_watermark)?;
+        let deleted_minute = delete_rollups(
+            &transaction,
+            60,
+            now_ms.saturating_sub(days_ms(retention.minute_days)),
+            quarter_watermark,
+            retention.delete_batch_rows,
+        )?;
+        let deleted_quarter = delete_rollups(
+            &transaction,
+            900,
+            now_ms.saturating_sub(days_ms(retention.quarter_hour_days)),
+            None,
+            retention.delete_batch_rows,
+        )?;
+        let deleted_events = anomaly_storage::delete_closed_events(&transaction, anomaly, now_ms)?;
+        set_state_integer(&transaction, LAST_MAINTENANCE_MS, now_ms)?;
+        set_state_text(
+            &transaction,
+            LAST_MAINTENANCE_RESULT,
+            &format!(
+                "ok: deleted raw={deleted_raw}, minute={deleted_minute}, quarter_hour={deleted_quarter}, events={deleted_events}"
+            ),
+        )?;
+        transaction.commit()?;
+        self.connection
+            .execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
+        Ok(())
+    }
+
+    pub fn list_events(&self, open_only: bool, limit: usize) -> Result<Vec<EventSummary>> {
+        anomaly_storage::list_events(&self.connection, open_only, limit)
+    }
+
+    pub fn event(&self, id: i64) -> Result<Option<EventDetail>> {
+        anomaly_storage::get_event(&self.connection, id)
+    }
+
     pub fn status(&self) -> Result<StorageStatus> {
         let schema_version = self
             .connection
@@ -210,6 +345,21 @@ impl Storage {
             quarter_hour_watermark_ms: get_state_integer(&self.connection, QUARTER_HOUR_WATERMARK)?,
             last_maintenance_ms: get_state_integer(&self.connection, LAST_MAINTENANCE_MS)?,
             last_maintenance_result: get_state_text(&self.connection, LAST_MAINTENANCE_RESULT)?,
+            open_warning_count: self.connection.query_row(
+                "SELECT COUNT(*) FROM anomaly_events WHERE status = 'open' AND severity = 'warning'",
+                [],
+                |row| row.get(0),
+            )?,
+            open_critical_count: self.connection.query_row(
+                "SELECT COUNT(*) FROM anomaly_events WHERE status = 'open' AND severity = 'critical'",
+                [],
+                |row| row.get(0),
+            )?,
+            latest_event_ms: self.connection.query_row(
+                "SELECT MAX(started_at_ms) FROM anomaly_events",
+                [],
+                |row| row.get(0),
+            )?,
         })
     }
 }
@@ -221,6 +371,9 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             "database schema version {version} is newer than supported version \
              {CURRENT_SCHEMA_VERSION}"
         );
+    }
+    if version == CURRENT_SCHEMA_VERSION {
+        return Ok(());
     }
 
     let transaction = connection.transaction()?;
@@ -659,19 +812,23 @@ fn file_size(path: &Path) -> u64 {
 pub fn spawn_writer(
     path: &Path,
     retention: RetentionConfig,
+    anomaly: AnomalyConfig,
     mut receiver: mpsc::Receiver<MetricBatch>,
 ) -> JoinHandle<Result<()>> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let mut storage = Storage::open(&path)?;
+        let mut anomaly_engine = storage.load_anomaly_engine(&anomaly)?;
         let maintenance_interval = Duration::from_secs(retention.maintenance_interval_seconds);
         let mut last_maintenance = Instant::now()
             .checked_sub(maintenance_interval)
             .unwrap_or_else(Instant::now);
         while let Some(batch) = receiver.blocking_recv() {
-            storage.insert_batch(&batch)?;
+            storage.insert_batch_with_anomalies(&batch, &mut anomaly_engine, &anomaly)?;
             if last_maintenance.elapsed() >= maintenance_interval {
-                if let Err(error) = storage.run_maintenance(&retention, Utc::now()) {
+                if let Err(error) =
+                    storage.run_maintenance_with_anomalies(&retention, &anomaly, Utc::now())
+                {
                     warn!(%error, "storage maintenance failed; collection will continue");
                 }
                 last_maintenance = Instant::now();
@@ -683,11 +840,16 @@ pub fn spawn_writer(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier};
+
     use chrono::{TimeZone, Utc};
     use tempfile::tempdir;
 
     use super::*;
-    use crate::model::Metric;
+    use crate::{
+        config::{AnomalyConfig, AnomalyRuleConfig},
+        model::Metric,
+    };
 
     fn at(milliseconds: i64) -> DateTime<Utc> {
         Utc.timestamp_millis_opt(milliseconds)
@@ -701,6 +863,39 @@ mod tests {
             rollup_batch_buckets: 1_000,
             ..RetentionConfig::default()
         }
+    }
+
+    fn test_anomaly_config() -> AnomalyConfig {
+        AnomalyConfig {
+            prelude_minutes: 5,
+            evidence_interval_seconds: 10,
+            rules: vec![AnomalyRuleConfig {
+                id: "cpu-test".to_owned(),
+                metric_name: "cpu.total.usage".to_owned(),
+                warning_threshold: 90.0,
+                critical_threshold: 97.0,
+                recovery_threshold: 75.0,
+                trigger_seconds: 10,
+                critical_trigger_seconds: 5,
+                recovery_seconds: 10,
+                min_samples: 3,
+                critical_min_samples: 2,
+                recovery_min_samples: 3,
+                max_sample_gap_seconds: 6,
+                ..AnomalyRuleConfig::default()
+            }],
+            ..AnomalyConfig::default()
+        }
+    }
+
+    fn cpu_metric(seconds: i64, value: f64) -> Metric {
+        Metric::new(
+            at(seconds * 1_000),
+            "system",
+            "cpu.total.usage",
+            value,
+            "percent",
+        )
     }
 
     #[test]
@@ -722,6 +917,34 @@ mod tests {
         assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(status.raw.row_count, 1);
         assert_eq!(status.raw.oldest_ms, Some(1_000));
+    }
+
+    #[test]
+    fn opens_a_current_database_concurrently() {
+        let directory = tempdir().expect("temp dir");
+        let path = directory.path().join("metrics.sqlite3");
+        drop(Storage::open(&path).expect("initialize storage"));
+        let barrier = Arc::new(Barrier::new(3));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    Storage::open(&path)
+                        .and_then(|storage| storage.status())
+                        .expect("concurrent open")
+                })
+            })
+            .collect();
+        barrier.wait();
+
+        for handle in handles {
+            assert_eq!(
+                handle.join().expect("thread").schema_version,
+                CURRENT_SCHEMA_VERSION
+            );
+        }
     }
 
     #[test]
@@ -784,6 +1007,154 @@ mod tests {
 
         assert_eq!(storage.status().expect("status").raw.row_count, 1);
         assert_eq!(timestamp_ms, 1_784_073_600_000);
+    }
+
+    #[test]
+    fn upgrades_a_v2_database_with_anomaly_tables() {
+        let directory = tempdir().expect("temp dir");
+        let path = directory.path().join("v2.sqlite3");
+        let legacy = Connection::open(&path).expect("open legacy database");
+        legacy
+            .execute_batch(
+                r#"
+                CREATE TABLE metric_samples (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    collected_at TEXT NOT NULL,
+                    collected_at_ms INTEGER NOT NULL,
+                    collector TEXT NOT NULL,
+                    resource TEXT,
+                    metric_name TEXT NOT NULL,
+                    value REAL NOT NULL,
+                    unit TEXT NOT NULL
+                );
+                INSERT INTO metric_samples
+                    (collected_at, collected_at_ms, collector, metric_name, value, unit)
+                VALUES ('2026-07-15T00:00:00Z', 1784073600000, 'system',
+                        'cpu.total.usage', 42.0, 'percent');
+                PRAGMA user_version = 2;
+                "#,
+            )
+            .expect("create v2 schema");
+        drop(legacy);
+
+        let storage = Storage::open(&path).expect("migrate storage");
+
+        assert_eq!(storage.status().expect("status").schema_version, 3);
+        assert_eq!(storage.status().expect("status").raw.row_count, 1);
+        assert!(table_exists(&storage.connection, "anomaly_events").expect("event table"));
+        assert!(table_exists(&storage.connection, "anomaly_states").expect("state table"));
+    }
+
+    #[test]
+    fn anomaly_event_survives_restart_and_closes_with_evidence() {
+        let directory = tempdir().expect("temp dir");
+        let path = directory.path().join("metrics.sqlite3");
+        let config = test_anomaly_config();
+        let event_id;
+        {
+            let mut storage = Storage::open(&path).expect("open storage");
+            let mut engine = storage
+                .load_anomaly_engine(&config)
+                .expect("new anomaly engine");
+            for metric in [
+                cpu_metric(0, 91.0),
+                cpu_metric(5, 92.0),
+                cpu_metric(10, 93.0),
+            ] {
+                storage
+                    .insert_batch_with_anomalies(&vec![metric], &mut engine, &config)
+                    .expect("evaluate sample");
+            }
+            let events = storage.list_events(true, 20).expect("open events");
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].severity, "warning");
+            event_id = events[0].id;
+            let event = storage.event(event_id).expect("read event").expect("event");
+            assert_eq!(event.sample_count, 3);
+            assert_eq!(event.evidence.len(), 3);
+            assert_eq!(event.evidence.last().expect("trigger").kind, "trigger");
+        }
+
+        let mut storage = Storage::open(&path).expect("reopen storage");
+        let mut engine = storage
+            .load_anomaly_engine(&config)
+            .expect("restore anomaly engine");
+        for metric in [
+            cpu_metric(15, 74.0),
+            cpu_metric(20, 74.0),
+            cpu_metric(25, 74.0),
+        ] {
+            storage
+                .insert_batch_with_anomalies(&vec![metric], &mut engine, &config)
+                .expect("recovery sample");
+        }
+
+        assert!(
+            storage
+                .list_events(true, 20)
+                .expect("open events")
+                .is_empty()
+        );
+        let event = storage.event(event_id).expect("read event").expect("event");
+        assert_eq!(event.summary.status, "closed");
+        assert_eq!(event.sample_count, 6);
+        assert_eq!(event.evidence.last().expect("recovery").kind, "recovery");
+    }
+
+    #[test]
+    fn evidence_outlives_raw_samples_and_event_retention_removes_it() {
+        let directory = tempdir().expect("temp dir");
+        let path = directory.path().join("metrics.sqlite3");
+        let mut storage = Storage::open(&path).expect("open storage");
+        let mut config = test_anomaly_config();
+        config.event_retention_days = 1;
+        let mut engine = storage
+            .load_anomaly_engine(&config)
+            .expect("anomaly engine");
+        for metric in [
+            cpu_metric(0, 91.0),
+            cpu_metric(5, 92.0),
+            cpu_metric(10, 93.0),
+            cpu_metric(15, 74.0),
+            cpu_metric(20, 74.0),
+            cpu_metric(25, 74.0),
+        ] {
+            storage
+                .insert_batch_with_anomalies(&vec![metric], &mut engine, &config)
+                .expect("sample");
+        }
+        let event_id = storage.list_events(false, 20).expect("events")[0].id;
+        let retention = RetentionConfig {
+            raw_hours: 1,
+            late_arrival_grace_seconds: 0,
+            rollup_batch_buckets: 1_000,
+            ..RetentionConfig::default()
+        };
+
+        storage
+            .run_maintenance_with_anomalies(&retention, &config, at(12 * 60 * 60 * 1_000))
+            .expect("raw retention");
+        assert_eq!(storage.status().expect("status").raw.row_count, 0);
+        assert!(
+            !storage
+                .event(event_id)
+                .expect("event")
+                .expect("retained event")
+                .evidence
+                .is_empty()
+        );
+
+        storage
+            .run_maintenance_with_anomalies(&retention, &config, at(2 * 24 * 60 * 60 * 1_000))
+            .expect("event retention");
+        assert!(storage.event(event_id).expect("event query").is_none());
+        let evidence_rows: i64 = storage
+            .connection
+            .query_row("SELECT COUNT(*) FROM anomaly_event_evidence", [], |row| {
+                row.get(0)
+            })
+            .expect("evidence count");
+        assert_eq!(evidence_rows, 0);
     }
 
     #[test]

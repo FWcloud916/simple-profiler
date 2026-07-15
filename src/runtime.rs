@@ -35,7 +35,12 @@ async fn run_with_collectors(
     config.validate()?;
     let _instance_lock = InstanceLock::acquire(&config.database_path)?;
     let (sender, receiver) = mpsc::channel(config.channel_capacity);
-    let writer = spawn_writer(&config.database_path, config.retention.clone(), receiver);
+    let writer = spawn_writer(
+        &config.database_path,
+        config.retention.clone(),
+        config.anomaly.clone(),
+        receiver,
+    );
     let mut interval = tokio::time::interval(Duration::from_secs(config.interval_seconds));
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut collected_cycles = 0_u64;

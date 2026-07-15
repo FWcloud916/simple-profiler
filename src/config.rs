@@ -1,4 +1,4 @@
-use std::{fs, path::Path, path::PathBuf};
+use std::{collections::HashSet, fs, path::Path, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,7 @@ pub struct AppConfig {
     pub sampling: SamplingConfig,
     pub retention: RetentionConfig,
     pub logging: LoggingConfig,
+    pub anomaly: AnomalyConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +52,107 @@ impl Default for LoggingConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct AnomalyConfig {
+    pub enabled: bool,
+    pub event_retention_days: u64,
+    pub prelude_minutes: u64,
+    pub evidence_interval_seconds: u64,
+    pub delete_batch_rows: usize,
+    pub rules: Vec<AnomalyRuleConfig>,
+}
+
+impl Default for AnomalyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            event_retention_days: 365,
+            prelude_minutes: 5,
+            evidence_interval_seconds: 60,
+            delete_batch_rows: 1_000,
+            rules: default_anomaly_rules(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AnomalyRuleConfig {
+    pub id: String,
+    pub enabled: bool,
+    pub metric_name: String,
+    pub warning_threshold: f64,
+    pub critical_threshold: f64,
+    pub recovery_threshold: f64,
+    pub trigger_seconds: u64,
+    pub critical_trigger_seconds: u64,
+    pub recovery_seconds: u64,
+    pub min_samples: u64,
+    pub critical_min_samples: u64,
+    pub recovery_min_samples: u64,
+    pub max_sample_gap_seconds: u64,
+}
+
+impl Default for AnomalyRuleConfig {
+    fn default() -> Self {
+        Self {
+            id: "custom-high".to_owned(),
+            enabled: true,
+            metric_name: "cpu.total.usage".to_owned(),
+            warning_threshold: 90.0,
+            critical_threshold: 97.0,
+            recovery_threshold: 75.0,
+            trigger_seconds: 120,
+            critical_trigger_seconds: 60,
+            recovery_seconds: 60,
+            min_samples: 12,
+            critical_min_samples: 12,
+            recovery_min_samples: 12,
+            max_sample_gap_seconds: 15,
+        }
+    }
+}
+
+fn default_anomaly_rules() -> Vec<AnomalyRuleConfig> {
+    vec![
+        AnomalyRuleConfig {
+            id: "cpu-sustained-high".to_owned(),
+            ..AnomalyRuleConfig::default()
+        },
+        AnomalyRuleConfig {
+            id: "memory-pressure".to_owned(),
+            metric_name: "memory.usage".to_owned(),
+            warning_threshold: 90.0,
+            critical_threshold: 95.0,
+            recovery_threshold: 85.0,
+            trigger_seconds: 300,
+            critical_trigger_seconds: 120,
+            recovery_seconds: 120,
+            min_samples: 60,
+            critical_min_samples: 24,
+            recovery_min_samples: 24,
+            max_sample_gap_seconds: 15,
+            ..AnomalyRuleConfig::default()
+        },
+        AnomalyRuleConfig {
+            id: "disk-space-low".to_owned(),
+            metric_name: "disk.space.usage".to_owned(),
+            warning_threshold: 90.0,
+            critical_threshold: 95.0,
+            recovery_threshold: 88.0,
+            trigger_seconds: 60,
+            critical_trigger_seconds: 60,
+            recovery_seconds: 60,
+            min_samples: 2,
+            critical_min_samples: 2,
+            recovery_min_samples: 2,
+            max_sample_gap_seconds: 90,
+            ..AnomalyRuleConfig::default()
+        },
+    ]
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RetentionConfig {
     pub raw_hours: u64,
     pub minute_days: u64,
@@ -84,6 +186,7 @@ impl Default for AppConfig {
             sampling: SamplingConfig::default(),
             retention: RetentionConfig::default(),
             logging: LoggingConfig::default(),
+            anomaly: AnomalyConfig::default(),
         }
     }
 }
@@ -111,6 +214,7 @@ impl AppConfig {
         if self.logging.max_bytes == 0 || self.logging.retained_files == 0 {
             bail!("logging.max_bytes and logging.retained_files must be greater than zero");
         }
+        self.validate_anomaly()?;
         if self.retention.raw_hours == 0
             || self.retention.minute_days == 0
             || self.retention.quarter_hour_days == 0
@@ -127,6 +231,47 @@ impl AppConfig {
         }
         if self.retention.minute_days.saturating_mul(24) < self.retention.raw_hours {
             bail!("retention.minute_days must not be shorter than raw_hours");
+        }
+        Ok(())
+    }
+
+    fn validate_anomaly(&self) -> Result<()> {
+        let anomaly = &self.anomaly;
+        if anomaly.event_retention_days == 0
+            || anomaly.prelude_minutes == 0
+            || anomaly.evidence_interval_seconds == 0
+            || anomaly.delete_batch_rows == 0
+        {
+            bail!(
+                "anomaly retention, evidence intervals, and delete_batch_rows must be greater than zero"
+            );
+        }
+        let mut ids = HashSet::new();
+        for rule in &anomaly.rules {
+            if rule.id.trim().is_empty() || rule.metric_name.trim().is_empty() {
+                bail!("anomaly rule id and metric_name must not be empty");
+            }
+            if !ids.insert(&rule.id) {
+                bail!("anomaly rule ids must be unique: {}", rule.id);
+            }
+            if !rule.warning_threshold.is_finite()
+                || !rule.critical_threshold.is_finite()
+                || !rule.recovery_threshold.is_finite()
+                || rule.critical_threshold < rule.warning_threshold
+                || rule.recovery_threshold >= rule.warning_threshold
+            {
+                bail!("anomaly rule {} has invalid high-water thresholds", rule.id);
+            }
+            if rule.min_samples == 0
+                || rule.critical_min_samples == 0
+                || rule.recovery_min_samples == 0
+                || rule.max_sample_gap_seconds == 0
+            {
+                bail!(
+                    "anomaly rule {} sample limits must be greater than zero",
+                    rule.id
+                );
+            }
         }
         Ok(())
     }
