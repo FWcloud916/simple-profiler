@@ -18,8 +18,8 @@ measurement passed between collectors and storage.
 | Field | Meaning |
 |---|---|
 | `collected_at` | UTC timestamp assigned once per collector cycle |
-| `collector` | Adapter that produced the value: `system`, `disk`, or `network` |
-| `resource` | Optional mount point or network interface identity |
+| `collector` | Adapter that produced the value: `system`, `disk`, `network`, or `gpu` |
+| `resource` | Optional mount point, network interface, or GPU identity |
 | `name` | Hierarchical metric name such as `cpu.total.usage` |
 | `value` | Numeric measurement represented as `f64` |
 | `unit` | Explicit unit such as `percent` or `bytes` |
@@ -34,12 +34,20 @@ from one cycle.
 **Status: implemented.** A process sample records one bounded ranking entry: collection time, PID,
 process start time, optional parent PID, process name, optional executable path, CPU percentage,
 resident bytes, and optional CPU/memory ranks. PID plus start time is the stable identity used to
-distinguish PID reuse. A `CollectionBatch` combines a `MetricBatch` and one process snapshot and is
-the message sent through the bounded Tokio channel. The batch is one transaction boundary but has
-no database identifier or table.
+distinguish PID reuse. A `CollectionBatch` combines a `MetricBatch`, one process snapshot, and
+collector capability updates and is the message sent through the bounded Tokio channel. The batch
+is one transaction boundary but has no database identifier or table.
 
 Process privacy is deliberate: command lines, environment variables, and working directories are
 never collected. Executable path collection is opt-in and disabled by default.
+
+### CollectorCapability
+
+**Status: implemented in SQLite as `collector_capabilities`.** One row records the current state
+of a named collector field for a resource. Its identity is `(collector, resource, capability)`;
+the mutable fields are `available`, `degraded`, or `unavailable` state, provider name, optional
+detail, and the last check time. Capability updates commit in the same transaction as the metric
+batch that produced them. This is current state rather than time-series history.
 
 ### MetricSample
 
@@ -61,8 +69,8 @@ never collected. Executable path collection is opt-in and disabled by default.
 
 **Status: implemented, read model.** Contains schema version; row count and optional oldest/newest
 time for raw, one-minute, and 15-minute data; database/WAL/reusable-page sizes; both rollup
-watermarks; last maintenance time/result; open warning/critical counts; and the latest event time.
-It is not persisted as one object.
+watermarks; last maintenance time/result; open warning/critical counts; latest event time; and the
+current collector capabilities. It is not persisted as one object.
 
 ### MetricRollup
 
@@ -132,8 +140,9 @@ Copied evidence remains available after the 24-hour raw process snapshot retenti
 **Status: implemented as a transient read model and local HTML artifact; no schema.** A report
 contains its requested range, selected metric resolution, actual metric/process coverage, bounded
 resource series, overlapping anomaly events with preserved evidence, and bounded process
-summaries. The generated file embeds its CSS and SVG, performs no network requests, and states the
-process-data privacy boundary. Reports are not registered in SQLite and have no status lifecycle.
+summaries plus current collector capabilities. The generated file embeds its CSS and SVG,
+performs no network requests, and states the process-data privacy boundary. Reports are not
+registered in SQLite and have no status lifecycle.
 
 ### DashboardSnapshot
 
@@ -150,6 +159,7 @@ and does not add foreign keys.
 ```text
 CollectionCycle (transient) 1──* MetricSample
 CollectionCycle (transient) 1──* ProcessSample
+CollectionCycle (transient) 1──* CollectorCapability (current-state upsert)
 MetricSample *──* MetricRollup   (derived by matching series and time bucket; no foreign key)
 MaintenanceState ── stores ──► one-minute and 15-minute watermark keys
 AnomalyRuleState 0..1──0..1 Event
@@ -173,9 +183,9 @@ planned Device entity.
 2. The runtime waits for the Tokio interval and creates one `CollectionContext` containing a shared
    UTC timestamp and optional elapsed time.
 3. `SystemCollector`, `DiskCollector`, and `NetworkCollector` run each metric cycle;
-   `ProcessCollector` runs on its independent 15-second default cadence.
-4. Collector failures are logged while successful metric and process results are combined into one
-   `CollectionBatch`.
+   `ProcessCollector` and `GpuCollector` run on independent 15-second default cadences.
+4. Collector failures are logged while successful metric, process, and capability results are
+   combined into one `CollectionBatch`.
 5. A non-empty batch is sent through the bounded channel and committed with anomaly evaluation as
    one transaction.
 6. A sample limit, Ctrl-C, or SIGTERM stops collection, closes the channel, drains queued batches,
@@ -191,6 +201,9 @@ consumers interpret those missing delta intervals as zero activity.
 Process CPU usage also requires a previous refresh, so the first due process refresh only warms
 the collector. Later snapshots rank all visible processes, then retain the union of the configured
 top CPU and top resident-memory entries. The default union contains at most 20 rows per snapshot.
+On macOS, the GPU collector parses the `AGXAccelerator` property list from `/usr/sbin/ioreg` with a
+two-second timeout. Repeated command failures back off exponentially up to five minutes. Missing
+or invalid fields change only their capability state and never emit a synthetic zero metric.
 
 ## 4. Storage Flow
 
@@ -199,8 +212,9 @@ top CPU and top resident-memory entries. The default union contains at most 20 r
    transactional schema upgrade.
 3. Startup restores configured rule states from `anomaly_states`.
 4. For each received `CollectionBatch`, the writer clones and evaluates the engine, then commits
-   raw metric/process samples, event transitions, metric/process evidence, and all next states
-   inside one SQLite transaction. The live engine advances only after commit succeeds.
+   raw metric/process samples, collector capability upserts, event transitions, metric/process
+   evidence, and all next states inside one SQLite transaction. The live engine advances only
+   after commit succeeds.
 5. At the configured cadence, the same writer transaction recomputes up to the configured number
    of complete one-minute buckets, then derives complete 15-minute buckets from them.
 6. That transaction advances watermarks and deletes expired metrics and closed events in bounded
@@ -211,7 +225,8 @@ top CPU and top resident-memory entries. The default union contains at most 20 r
 
 Schema version 2 adds `collected_at_ms`, backfills v1 timestamps, and creates `metric_rollups` and
 `maintenance_state`. Schema version 3 creates the three anomaly tables and their query indexes.
-Schema version 4 creates `process_samples` and `anomaly_event_process_evidence`. A
+Schema version 4 creates `process_samples` and `anomaly_event_process_evidence`. Schema version 5
+creates `collector_capabilities`. A
 database newer than the supported version is rejected rather than opened with an incompatible
 writer. Rollup buckets wait for the configured late-arrival grace period.
 One-minute aggregation reads raw rows in timestamp/ID order; 15-minute aggregation combines counts,
@@ -269,22 +284,24 @@ process attribution because the collected process dimensions do not identify fil
 2. The reader prefers raw rows for ranges up to two hours, one-minute rollups for ranges up to 24
    hours, and 15-minute rollups for longer ranges, falling back to another retained tier when the
    preferred tier has no rows.
-3. A fixed metric whitelist selects total CPU usage, memory usage, per-mount disk-space usage,
-   disk read/write rates, and network receive/transmit rates. SQL time buckets cap each series at
-   approximately 1,200 points while preserving weighted averages and observed minima/maxima.
+3. A fixed metric whitelist selects total CPU usage, memory usage, Apple GPU usage/memory fields,
+   per-mount disk-space usage, disk read/write rates, and network receive/transmit rates. SQL time
+   buckets cap each series at approximately 1,200 points while preserving weighted averages and
+   observed minima/maxima.
 4. The reader adds at most 200 overlapping anomaly events with their bounded stored evidence, plus
    the union of the top 20 CPU and top 20 memory process summaries grouped by PID and start time.
-5. The renderer escapes all persisted labels and names, embeds CSS and SVG without JavaScript or
-   external assets, and writes the completed document using a temporary sibling plus atomic rename.
+5. The renderer includes current collector capabilities, escapes all persisted labels and names,
+   embeds CSS and SVG without JavaScript or external assets, and writes the completed document
+   using a temporary sibling plus atomic rename.
 6. Output defaults to `~/Documents/SimpleProfiler Reports/`; `--output` selects another file and
    the opt-in `--open` flag invokes the local macOS viewer after the write succeeds.
 
-Report generation is read-only and does not change schema version 4, retention watermarks, anomaly
+Report generation is read-only and does not change schema version 5, retention watermarks, anomaly
 state, or the running background collector.
 
 ## 7. Dashboard Query Flow
 
-1. `dashboard` verifies that the selected database already uses schema version 4, generates a
+1. `dashboard` verifies that the selected database already uses schema version 5, generates a
    random 128-bit session token, and binds an available `127.0.0.1` port by default.
 2. Requests must carry the generated token in their path and the exact loopback Host value. Only
    versioned `GET` APIs exist; responses disable caching, framing, referrer forwarding, and remote
@@ -295,8 +312,8 @@ state, or the running background collector.
    approximately 1,200 points per series, 200 event-summary limit, and top-20 CPU/memory process
    union. `/api/v1/events/<ID>` loads preserved evidence only for the selected event.
 5. The embedded browser client renders light/dark resource charts with min/max bands and explicit
-   gaps, anomaly drill-down, storage health, and sortable process summaries. It refreshes every 15
-   seconds by default and uses no remote assets or telemetry.
+   gaps, a GPU summary, capability health, anomaly drill-down, storage health, and sortable process
+   summaries. It refreshes every 15 seconds by default and uses no remote assets or telemetry.
 6. Ctrl-C or SIGTERM gracefully stops only the dashboard listener. The separately installed
    background collector and its single writer continue uninterrupted.
 
@@ -315,6 +332,11 @@ The implemented names are:
 | `memory.used` | `bytes` | One per cycle |
 | `memory.available` | `bytes` | One per cycle |
 | `memory.usage` | `percent` | One per cycle |
+| `gpu.device.usage` | `percent` | One per Apple GPU collection when exposed |
+| `gpu.renderer.usage` | `percent` | One per Apple GPU collection when exposed |
+| `gpu.tiler.usage` | `percent` | One per Apple GPU collection when exposed |
+| `gpu.memory.used` | `bytes` | One per Apple GPU collection when exposed |
+| `gpu.memory.allocated` | `bytes` | One per Apple GPU collection when exposed |
 | `disk.space.total` | `bytes` | One per mount point at the capacity interval |
 | `disk.space.available` | `bytes` | One per mount point at the capacity interval |
 | `disk.space.used` | `bytes` | One per mount point at the capacity interval |
@@ -332,7 +354,8 @@ registry for validating names and units is TBD — not yet designed.
 ## 9. Failure Behavior
 
 - Invalid sampling/retention values, interval, channel capacity, retention-tier ordering, process
-  ranking limits, or event-evidence caps are rejected before the runtime starts.
+  ranking limits, event-evidence caps, or GPU timeout/interval values are rejected before the
+  runtime starts.
 - A collector error is logged, while successful collectors in the same cycle continue to storage.
 - An all-failed cycle does not write an empty batch but still counts toward `--samples`.
 - A closed storage channel stops the run with an error.
@@ -353,12 +376,14 @@ registry for validating names and units is TBD — not yet designed.
   binds outside IPv4 loopback, and creates a new session URL on every launch.
 - Dashboard queries run off Tokio worker threads with a four-query admission limit; an API error
   does not affect the collector or SQLite writer.
+- GPU command failures and timeouts emit no GPU metrics, persist degraded field capabilities, and
+  back off repeated retries. Missing property-list fields are unavailable rather than zero.
 - `service stop` sends SIGTERM and fails if the process does not report stopped within 20 seconds.
 - `launchctl` failures include stderr context instead of being reported as successful lifecycle
   changes.
 
-Per-collector health state, explicit missing-sample markers, and collector-failure event rules are
-planned — no schema yet.
+Historical collector-health timelines, explicit missing-sample markers, and collector-failure
+event rules are planned — no schema yet. Current field-level capability state is implemented.
 
 ## 10. Deprecated Components
 
@@ -368,7 +393,8 @@ N/A — the initial version has no deprecated domain components.
 
 No separate domain maintenance scripts exist. The writer performs rollup and retention maintenance
 internally. The `status` command shows raw/rollup ranges, storage sizes, watermarks, maintenance,
-and open-event counts. `events list` lists recent or open events and `events show` renders one
+open-event counts, and current collector capabilities. `events list` lists recent or open events
+and `events show` renders one
 event's thresholds, measurements, counts, metric evidence, and related-process evidence.
 `processes top` renders the latest CPU or resident-memory ranking. `report generate` performs an
 on-demand read-only query and writes the selected range as local HTML; `dashboard` serves bounded

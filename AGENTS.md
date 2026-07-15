@@ -7,8 +7,8 @@ Simple Profiler owns local collection and diagnostic storage of host resource me
 - MUST run `cargo test` successfully before declaring work done (source: README verification gate).
 - MUST run `cargo fmt --check` and Clippy before declaring Rust changes done (source: `rustfmt.toml` and `clippy.toml`).
 - MUST keep SQLite writes behind the single writer task (source: `docs/project-overview.md` §3).
-- MUST commit raw samples, anomaly transitions, evidence, and restored state in one writer
-  transaction (source: `docs/project-overview.md` §3).
+- MUST commit raw samples, collector capabilities, anomaly transitions, evidence, and restored
+  state in one writer transaction (source: `docs/project-overview.md` §3).
 - MUST keep collector-to-storage channels bounded (source: `docs/project-overview.md` §3).
 - MUST update `PROGRESS.md` at clock-out (source: selected agent-harness workflow).
 - MUST NOT install, unload, uninstall, or purge the macOS LaunchAgent without explicit user
@@ -54,13 +54,15 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ## Conventions
 
-- Collector implementations live under `src/collector/` and return normalized metric or process
-  snapshots to the runtime; they do not write SQLite directly.
+- Collector implementations live under `src/collector/` and return normalized metric, process, or
+  capability snapshots to the runtime; they do not write SQLite directly.
 - Blocking SQLite work stays in the storage writer's blocking task.
 - Anomaly rules and state transitions live in `src/anomaly.rs`; their SQLite representation and
   evidence queries live in `src/anomaly_storage.rs`.
 - Process snapshot persistence, ranking queries, retention, and anomaly attribution live in
   `src/process_storage.rs` and remain owned by the single writer transaction.
+- Collector capability upserts and reads live in `src/capability_storage.rs` and remain owned by
+  the same writer transaction as their metric batch.
 - Report time-range parsing and HTML rendering live in `src/report.rs`; bounded, read-only report
   queries and retention-tier selection live in `src/report_storage.rs`.
 - Dashboard loopback serving, session authorization, security headers, and API handlers live in

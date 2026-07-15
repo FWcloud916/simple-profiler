@@ -4,7 +4,11 @@ A local-first Rust service that continuously records system metrics for later di
 
 ## What it does
 
-- Collects CPU, memory, disk capacity/I/O, and network transfer metrics at a configurable interval.
+- Collects CPU, memory, Apple GPU, disk capacity/I/O, and network transfer metrics at configurable
+  intervals.
+- On Apple silicon, records GPU device/renderer/tiler utilization plus in-use and allocated GPU
+  memory through non-privileged structured `ioreg` output. Capability status explicitly reports
+  unavailable power, temperature, or unified-memory-total fields instead of storing zeroes.
 - Suppresses idle disk/network I/O by default and samples disk capacity every 60 seconds to limit
   storage growth.
 - Combines successful collectors into one cycle batch and sends it through a bounded channel.
@@ -20,7 +24,8 @@ A local-first Rust service that continuously records system metrics for later di
 - Retains raw samples for 24 hours, one-minute rollups for 30 days, and 15-minute rollups for 365
   days by default; closed anomaly events are retained for 365 days by default.
 - Reports schema version, row counts and time ranges by resolution, database/WAL size, rollup
-  watermarks, maintenance status, and open anomaly counts from the command line.
+  watermarks, maintenance status, open anomaly counts, and collector capabilities from the command
+  line.
 - Generates a self-contained local HTML diagnostic report for relative or explicit time ranges,
   automatically selecting raw, one-minute, or 15-minute data and including anomaly/process
   evidence without external scripts, fonts, or network requests.
@@ -30,7 +35,8 @@ A local-first Rust service that continuously records system metrics for later di
 - Installs and supervises itself as a per-user macOS LaunchAgent, with graceful shutdown,
   single-instance protection, service health output, and bounded log rotation.
 
-GPU collection is planned but is not implemented yet.
+NVIDIA/AMD adapters and per-process GPU attribution remain planned. The Apple adapter does not use
+`powermetrics` because it requires superuser privileges.
 
 ## Quickstart
 
@@ -82,6 +88,13 @@ cargo run -- events show 1
 [`config/default.toml`](config/default.toml) contains the default sustained CPU, memory-pressure,
 and per-mount disk-space rules. Rule state is stored in SQLite, so a normal process restart does
 not reset an in-progress detection or open event.
+
+### Inspect GPU capabilities
+
+GPU collection is enabled by default every 15 seconds on macOS. The same status commands show each
+field as `available`, `degraded`, or `unavailable` together with its provider and reason. Configure
+the adapter under `[gpu]` in [`config/default.toml`](config/default.toml); `provider = "auto"`
+selects the non-privileged Apple `ioreg` adapter on macOS.
 
 ### Inspect resource-heavy processes
 
@@ -173,7 +186,7 @@ docs/          Architecture and development references
 src/           CLI, collectors, dashboard assets/server, runtime coordination, models, and storage
 Cargo.toml     Rust package and dependency manifest
 PROGRESS.md    Cross-session implementation state
-DESIGN.md      Planned dashboard design contract
+DESIGN.md      Dashboard design contract
 ```
 
 ## Documentation

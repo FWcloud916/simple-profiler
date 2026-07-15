@@ -1,11 +1,11 @@
 # Simple Profiler — Progress
 
-> **Last session:** 2026-07-15 · commit `4976f40` · tests: passing (59)
+> **Last session:** 2026-07-15 · commit `7d92f20` · tests: passing (65)
 
 ## Now (WIP = 1)
 
-No feature is active. The local read-only dashboard is implemented; capability-aware GPU
-collection is the next product feature.
+No feature is active. Capability-aware Apple GPU collection is implemented and verified on the
+local Apple M4; upgrading the installed LaunchAgent still requires explicit user approval.
 
 ## Feature list
 
@@ -18,7 +18,7 @@ collection is the next product feature.
 | 5 | Record bounded top-process snapshots and attribute CPU/memory events | `cargo test` | passing |
 | 6 | Generate a local HTML diagnostic report for a selected time range | `cargo test` | passing |
 | 7 | Explore metrics and events in a local dashboard | `cargo test` | passing |
-| 8 | Collect GPU measurements through capability-aware platform adapters | `cargo test` | not_started |
+| 8 | Collect GPU measurements through capability-aware platform adapters | `cargo test` | passing |
 | 9 | Install and supervise the profiler as an operating-system background service | `cargo test` | passing |
 
 ## Done
@@ -99,6 +99,16 @@ collection is the next product feature.
   invalid range and hostile Host checks, security-header checks, and live 1h/24h/7d API smoke
   tests. Live responses selected raw/1m/15m tiers in 5–26 ms, stayed below 1 MiB, and background
   sample timestamps continued advancing during dashboard queries.
+- SQLite schema v5 stores current collector capability state and commits it in the same writer
+  transaction as the metric/process batch, anomaly transitions, evidence, and restart state.
+- A non-privileged Apple GPU adapter now parses structured `ioreg` property-list output every 15
+  seconds by default, recording device/renderer/tiler utilization plus in-use/allocated memory.
+- GPU fields independently report available, degraded, or unavailable state. Root-only
+  `powermetrics` is deliberately not used; GPU power, temperature, unified-memory total, and
+  per-process GPU attribution remain unavailable instead of being synthesized as zero.
+- Status, service status, reports, and the dashboard now expose GPU metrics/capabilities. The GPU
+  phase passes 65 tests, rustfmt, strict Clippy, release build, schema-v4-to-v5 migration, M4 live
+  collection, report rendering, and loopback dashboard API smoke checks.
 
 ## Blockers
 
@@ -106,13 +116,24 @@ None.
 
 ## Next steps
 
-1. Inventory Apple, NVIDIA, and AMD GPU capability probes available without privileged access.
-2. Define stable GPU metric names, units, device identity, and unavailable/error semantics.
-3. Implement the macOS Apple GPU adapter first behind a capability-aware collector contract.
+1. After explicit approval, upgrade the installed LaunchAgent to the schema-v5 GPU release and
+   verify background GPU samples advance.
+2. Design NVIDIA and AMD adapters without weakening field-level capability semantics.
+3. Decide whether GPU anomaly rules are useful after observing real retained workloads.
 4. Inspect the first naturally occurring CPU or memory anomaly to validate its preserved process
    evidence in reports and the dashboard.
 
 ## Decision log
+
+- 2026-07-15 — Collect Apple GPU device/renderer/tiler utilization and in-use/allocated memory from
+  structured non-privileged `ioreg` output every 15 seconds, with a two-second timeout and
+  exponential retry backoff capped at five minutes.
+- 2026-07-15 — Persist current field-level collector capabilities in schema v5; missing/invalid
+  fields are unavailable or degraded, never synthetic zeroes, and capability upserts share the
+  metric batch transaction.
+- 2026-07-15 — Do not invoke root-only `powermetrics`; leave GPU power, temperature, unified-memory
+  total, and per-process attribution explicitly unavailable until a stable non-privileged source
+  exists.
 
 - 2026-07-15 — Serve the dashboard only on `127.0.0.1` with an ephemeral port, random 128-bit
   session path, exact Host validation, no mutation routes/CORS, strict response headers, and at

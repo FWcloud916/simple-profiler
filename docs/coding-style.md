@@ -37,7 +37,7 @@ There is no CI configuration yet. The repository's pre-merge gate is the local c
 ### Typed configuration validation
 
 [`../src/config.rs`](../src/config.rs) deserializes into `AppConfig`, applies defaults with
-`#[serde(default)]`, and validates runtime, sampling, logging, anomaly, process, and retention
+`#[serde(default)]`, and validates runtime, sampling, logging, anomaly, process, GPU, and retention
 settings before work begins. Durations, log limits, and batch limits that must be positive are
 rejected at zero; retention tiers are checked from shortest to longest. Anomaly rule validation
 also enforces unique non-empty IDs, finite ordered high-water thresholds, positive sample limits,
@@ -61,17 +61,18 @@ be attached at the caller boundary.
 [`../src/storage.rs`](../src/storage.rs) owns SQLite inside `tokio::task::spawn_blocking`, while
 [`../src/anomaly_storage.rs`](../src/anomaly_storage.rs) contains event/state/evidence statements
 and [`../src/process_storage.rs`](../src/process_storage.rs) contains process persistence,
-attribution, and ranking queries called by that owner. Async runtime code MUST NOT execute
-rusqlite statements directly on a Tokio worker thread. Raw inserts, anomaly transitions, evidence,
-restored state, rollups, retention
+attribution, and ranking queries called by that owner. Collector capability upserts and reads live
+in [`../src/capability_storage.rs`](../src/capability_storage.rs). Async runtime code MUST NOT
+execute rusqlite statements directly on a Tokio worker thread. Raw inserts, capability updates,
+anomaly transitions, evidence, restored state, rollups, retention
 cleanup, maintenance watermarks, and WAL checkpoints MUST preserve this single-writer boundary.
 
 ## 4. Team Conventions (Not Enforced by the Linter)
 
 ### 4.1 Separate collection from persistence
 
-Collectors MUST return normalized measurements or process snapshots and MUST NOT open SQLite
-connections.
+Collectors MUST return normalized measurements, process snapshots, or capability updates and MUST
+NOT open SQLite connections.
 
 ```rust
 // Good: collector returns data to the runtime.
@@ -102,14 +103,19 @@ Documentation MUST distinguish implemented behavior from `planned — no schema 
 
 ## 5. Architecture Conventions
 
-- Collector implementations belong under `src/collector/` and implement `Collector`.
+- Collector implementations belong under `src/collector/`; specialized collectors MAY expose a
+  typed result when they return both metrics and capability state.
 - Runtime coordination belongs in `src/runtime.rs`; collectors SHOULD NOT own schedules.
 - General storage ownership belongs in `src/storage.rs`; anomaly persistence and query details
   belong in `src/anomaly_storage.rs`; process persistence, attribution, retention, and ranking
-  queries belong in `src/process_storage.rs`. All MUST preserve the single-writer boundary.
+  queries belong in `src/process_storage.rs`; capability upserts and reads belong in
+  `src/capability_storage.rs`. All MUST preserve the single-writer boundary.
 - Anomaly state transitions belong in `src/anomaly.rs` and SHOULD remain testable without SQLite.
-- A batch's raw metric/process rows, anomaly event changes, metric/process evidence, and next rule
-  states MUST commit in one transaction; the live engine MUST advance only after that commit.
+- A batch's raw metric/process rows, collector capabilities, anomaly event changes, metric/process
+  evidence, and next rule states MUST commit in one transaction; the live engine MUST advance only
+  after that commit.
+- External collector commands MUST use absolute executable paths, structured output, bounded
+  timeouts, and explicit unavailable/degraded states; they MUST NOT require privilege escalation.
 - Retention cleanup MUST NOT pass the watermark proving that the downstream rollup tier completed.
 - Maintenance work SHOULD use bounded bucket and row batches; automatic `VACUUM` MUST NOT run in
   the collection path.
