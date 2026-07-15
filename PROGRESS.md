@@ -1,12 +1,11 @@
 # Simple Profiler — Progress
 
-> **Last session:** 2026-07-15 · implementation pending commit · tests: passing (74)
+> **Last session:** 2026-07-16 · commit `b7b5f41` · tests: passing (74)
 
 ## Now (WIP = 1)
 
-Multi-resource process attribution is complete in the repository and not yet installed. The
-currently installed LaunchAgent remains on the earlier schema-v5 chart-inspection release until a
-separate explicit upgrade approval.
+No feature is active. Multi-resource process attribution is committed and the per-user LaunchAgent
+now runs schema v6. The optional root GPU helper remains intentionally uninstalled.
 
 ## Feature list
 
@@ -152,6 +151,13 @@ separate explicit upgrade approval.
 - CLI sorting, HTML reports, anomaly process evidence, storage health, config defaults, and core
   docs cover all process dimensions. Verification passes 74 tests, rustfmt, strict Clippy, schema
   v5 migration, process-rollup retention, and helper plist parsing tests.
+- Commits `0d33d8d` and `b7b5f41` were installed after explicit approval. The LaunchAgent restarted
+  as PID 60795, the production database migrated from schema v5 to v6, and system/process samples
+  continued advancing. Live `nettop` verification exposed a trailing-comma CSV variant; the parser
+  compatibility fix changed `process.network_io` from degraded to available.
+- Production Top 5 checks returned real process network and disk rates: the observed leader showed
+  8.38 KiB/s receive, 42.40 KiB/s transmit, 589.54 KiB/s disk read, and 690.67 KiB/s disk write.
+  Process rollup backfill began on the single writer in bounded 60-bucket maintenance batches.
 
 ## Blockers
 
@@ -159,9 +165,9 @@ None.
 
 ## Next steps
 
-1. With explicit approval, upgrade the installed user LaunchAgent so its database migrates to v6.
-2. Separately decide whether to install the optional root GPU helper LaunchDaemon.
-3. Observe real disk/network attribution and tune per-dimension top-N limits if necessary.
+1. Separately decide whether to install the optional root GPU helper LaunchDaemon.
+2. Observe real disk/network attribution and tune per-dimension top-N limits if necessary.
+3. Confirm the bounded process rollup backfill reaches the current completed minute/quarter-hour.
 
 ## Decision log
 

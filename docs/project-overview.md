@@ -2,7 +2,7 @@
 
 > **Type:** Explanation
 > **Audience:** Developers, AI assistants, and tooling that needs project context
-> **Last updated:** 2026-07-15
+> **Last updated:** 2026-07-16
 >
 > A local-first system profiler for collecting evidence needed to diagnose host problems.
 > Related docs: [domain-models.md](domain-models.md), [coding-style.md](coding-style.md),

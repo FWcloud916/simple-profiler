@@ -2,7 +2,7 @@
 
 > **Type:** Reference
 > **Audience:** Developers, AI assistants, and code reviewers
-> **Last updated:** 2026-07-15
+> **Last updated:** 2026-07-16
 >
 > Implemented and planned metric, storage, and diagnostic concepts.
 

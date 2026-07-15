@@ -2,7 +2,7 @@
 
 > **Type:** Reference / How-to
 > **Audience:** Developers, AI assistants, and code reviewers
-> **Last updated:** 2026-07-15
+> **Last updated:** 2026-07-16
 >
 > This document records only conventions backed by the current Rust configuration, source, or
 > explicitly selected architecture.
