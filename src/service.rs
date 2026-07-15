@@ -92,6 +92,7 @@ impl ServiceManager {
         install_files(&self.paths, source_binary)?;
         if self.status()?.loaded {
             run_launchctl([OsStr::new("bootout"), self.target().as_os_str()])?;
+            self.wait_until_unloaded(Duration::from_secs(5))?;
         }
         run_launchctl([
             OsStr::new("bootstrap"),
@@ -187,6 +188,20 @@ impl ServiceManager {
         }
         if self.status()?.running() {
             bail!("service did not stop within {} seconds", timeout.as_secs());
+        }
+        Ok(())
+    }
+
+    fn wait_until_unloaded(&self, timeout: Duration) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        while self.status()?.loaded && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(100));
+        }
+        if self.status()?.loaded {
+            bail!(
+                "service did not unload within {} seconds",
+                timeout.as_secs()
+            );
         }
         Ok(())
     }
