@@ -9,6 +9,8 @@ Simple Profiler owns local collection and diagnostic storage of host resource me
 - MUST keep SQLite writes behind the single writer task (source: `docs/project-overview.md` §3).
 - MUST keep collector-to-storage channels bounded (source: `docs/project-overview.md` §3).
 - MUST update `PROGRESS.md` at clock-out (source: selected agent-harness workflow).
+- MUST NOT install, unload, uninstall, or purge the macOS LaunchAgent without explicit user
+  approval (source: `docs/project-overview.md` §10).
 
 ## Read before you work
 
@@ -25,7 +27,9 @@ Read the matching doc before non-trivial work. Small fixes and running checks ca
 
 ```bash
 cargo build
+cargo build --release
 cargo run -- run
+target/release/simple-profiler service status
 cargo test
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
@@ -49,4 +53,3 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 When modifying a file under `docs/`, update its `> **Last updated:** YYYY-MM-DD` field to
 today's date. Requirement keywords (MUST, SHOULD, MAY) follow RFC 2119.
-

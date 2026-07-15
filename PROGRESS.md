@@ -1,11 +1,11 @@
 # Simple Profiler — Progress
 
-> **Last session:** 2026-07-15 · commit `4ade288` · tests: passing
+> **Last session:** 2026-07-15 · commit `b43a981` · tests: passing
 
 ## Now (WIP = 1)
 
-No feature is active. Tiered retention is complete; sustained anomaly detection is the next
-planned feature.
+No feature is active. macOS background-service management is implemented; sustained anomaly
+detection remains the next product feature.
 
 ## Feature list
 
@@ -18,7 +18,7 @@ planned feature.
 | 5 | Generate a local HTML diagnostic report for a selected time range | `cargo test` | not_started |
 | 6 | Explore metrics and events in a local dashboard | `cargo test` | not_started |
 | 7 | Collect GPU measurements through capability-aware platform adapters | `cargo test` | not_started |
-| 8 | Install and supervise the profiler as an operating-system background service | `cargo test` | not_started |
+| 8 | Install and supervise the profiler as an operating-system background service | `cargo test` | passing |
 
 ## Done
 
@@ -40,6 +40,15 @@ planned feature.
   last maintenance result.
 - The retention phase passes 19 tests plus rustfmt and strict Clippy verification; a three-cycle
   live collection/status smoke test also passed.
+- Per-user macOS LaunchAgent install/start/stop/restart/status/uninstall commands implemented.
+- Installed binaries, private configuration, database, logs, and plist use standard user-library
+  paths; reinstall preserves configuration and normal uninstall preserves all user data.
+- SIGTERM drains queued SQLite batches before exit, while an advisory lock rejects a second
+  collector targeting the same database.
+- File logs rotate at a configurable size with a bounded number of retained files; routine
+  collection-cycle entries use debug level.
+- The service phase passes 26 tests, `plutil`, rustfmt, strict Clippy, release build, SIGTERM, and
+  competing-process integration checks. No real LaunchAgent was loaded without user approval.
 
 ## Blockers
 
@@ -47,10 +56,11 @@ None.
 
 ## Next steps
 
-1. Define anomaly rules, duration thresholds, and the event evidence model.
-2. Decide whether anomaly evaluation reads raw samples, rollups, or both.
-3. Define report queries that select the appropriate raw or rolled-up resolution.
-4. Design background-service installation and supervision for supported operating systems.
+1. With explicit approval, install the release LaunchAgent and verify live stop/restart and
+   continued collection outside the terminal.
+2. Define anomaly rules, duration thresholds, and the event evidence model.
+3. Decide whether anomaly evaluation reads raw samples, rollups, or both.
+4. Define report queries that select the appropriate raw or rolled-up resolution.
 
 ## Decision log
 
@@ -64,6 +74,14 @@ None.
   60-bucket limit, 10,000-row delete chunks, downstream watermarks, and no automatic `VACUUM`.
 - 2026-07-15 — Suppress fully idle disk/network I/O and sample disk capacity every 60 seconds by
   default; missing sparse delta intervals represent zero activity.
+- 2026-07-15 — Implement macOS background execution as the per-user
+  `com.simple-profiler.agent` LaunchAgent; system-wide LaunchDaemon, Linux, and Windows service
+  management remain future work.
+- 2026-07-15 — Install under `~/Library/Application Support/SimpleProfiler`, keep logs under
+  `~/Library/Logs/SimpleProfiler`, preserve data on normal uninstall, and require `--purge` for
+  destructive removal.
+- 2026-07-15 — Handle SIGTERM through the normal drain path and use a per-database advisory lock so
+  a manual process cannot race the LaunchAgent's writer/maintenance state.
 - 2026-07-15 — Share one timestamp/elapsed context across collectors, combine successful results,
   and suppress rate metrics during the first warm-up cycle.
 - 2026-07-15 — Use Rust after reviewing Rust and Go; rationale is recorded in

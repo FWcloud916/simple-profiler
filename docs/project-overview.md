@@ -17,7 +17,9 @@
 Simple Profiler continuously samples host resource metrics, persists them locally, and will
 eventually turn selected time ranges into diagnostic reports. The implemented MVP collects CPU,
 memory, disk, and network measurements, writes raw data to SQLite, and maintains one-minute and
-15-minute retention tiers. GPU, anomaly detection, reports, and a local dashboard are planned.
+15-minute retention tiers. On macOS it can install itself as a per-user LaunchAgent and expose
+service lifecycle/health commands. GPU, anomaly detection, reports, and a local dashboard are
+planned.
 
 ### 1.2 Relationship with Other Systems
 
@@ -29,6 +31,8 @@ vendor-specific adapters, but their exact APIs are not yet designed.
 
 - **Not yet enabled:** GPU, process, temperature, and power collectors.
 - **Not yet enabled:** anomaly events, reports, and the dashboard.
+- **Not yet enabled:** Linux systemd, Windows Service, system-wide macOS LaunchDaemon, signed
+  installer, and automatic updates.
 - No deprecated features exist in the initial version.
 
 ## 2. Tech Stack
@@ -42,6 +46,7 @@ vendor-specific adapters, but their exact APIs are not yet designed.
 | CLI | Clap 4.6.1 | Defines the implemented `run` and `status` commands |
 | Configuration | TOML through toml 1.1.3 and Serde | Human-readable local configuration with typed validation |
 | Logs | tracing and tracing-subscriber | Structured runtime lifecycle and collection messages |
+| macOS process control | launchd/launchctl plus libc 0.2.186 | Per-user supervision, effective-user identity, and advisory process locking |
 | Error handling | anyhow and thiserror | Application context plus typed collector errors |
 
 Rust was chosen over Go because the user explicitly selected Rust after reviewing the trade-off.
@@ -72,6 +77,12 @@ Tokio interval ──► shared CollectionContext
                          ├── raw rows   └── 1m / 15m rollups
 ```
 
+On macOS, `launchd` starts the installed executable with its private configuration. Before opening
+the collector channel, `run` acquires an advisory lock beside the selected database so a terminal
+process and LaunchAgent cannot maintain the same database concurrently. `SIGINT` and `SIGTERM`
+share the same shutdown path: stop collection, close the channel, drain queued batches, and join
+the writer. Runtime logs can use a size-limited file writer with numbered retained files.
+
 The CLI assembles configuration and chooses an operation. `run` starts all collectors and the
 storage writer; `status` opens the same SQLite database and summarizes each retention tier,
 database/WAL size, rollup watermarks, and the last maintenance result. Each cycle supplies one UTC
@@ -86,9 +97,12 @@ therefore mean zero activity; disk capacity is emitted every 60 seconds.
 - The collector-to-storage channel MUST remain bounded so slow storage creates backpressure.
 - One writer task owns the SQLite connection to avoid write-lock contention.
 - Rollup, retention deletion, and WAL checkpoint work MUST stay on that same writer task.
+- Only one profiler process may own a database's instance lock at a time.
 - Blocking database work runs outside Tokio's asynchronous worker threads.
 - A collector failure SHOULD be isolated and logged without corrupting already stored data.
 - Implemented and planned capabilities MUST be labeled separately.
+- Installing or removing a LaunchAgent changes user service state and MUST require explicit user
+  intent; normal uninstall MUST preserve configuration, metrics, and logs.
 
 ## 4. Directory Structure
 
@@ -104,10 +118,13 @@ therefore mean zero activity; disk capacity is emitted every 60 seconds.
 │   │   ├── network.rs     # Interface transfer and error collector
 │   │   └── system.rs      # CPU and memory collector
 │   ├── config.rs          # TOML model, defaults, and validation
+│   ├── instance.rs        # Per-database process lock
 │   ├── lib.rs             # Library module exports
+│   ├── logging.rs         # Console or size-rotated file logging
 │   ├── main.rs            # Clap CLI and command dispatch
 │   ├── model.rs           # Normalized Metric and MetricBatch types
 │   ├── runtime.rs         # Timed collection and graceful shutdown
+│   ├── service.rs         # macOS LaunchAgent files and lifecycle management
 │   └── storage.rs         # SQLite schema, queries, and writer task
 ├── AGENTS.md              # AI-agent routing and hard constraints
 ├── CLAUDE.md              # Symlink to AGENTS.md
@@ -145,6 +162,10 @@ Simple Profiler has a CLI interface and no HTTP interface yet.
 |---|---|---|
 | `simple-profiler run` | Collect CPU, memory, disk, and network metrics until interrupted or a sample limit is reached | `--database`, `--interval-seconds`, `--samples` |
 | `simple-profiler status` | Print schema, per-tier row counts/ranges, file sizes, watermarks, and maintenance result | `--database` |
+| `simple-profiler service install` | Copy the current executable, preserve/create service configuration, write the plist, load it, and start collection | none |
+| `simple-profiler service start\|stop\|restart` | Manage the installed per-user LaunchAgent; stop waits for graceful SIGTERM shutdown | none |
+| `simple-profiler service status` | Show installed/loaded/running state, PID, last exit code, paths, latest sample, and maintenance result | none |
+| `simple-profiler service uninstall` | Unload the agent and remove its plist/binary while preserving user data | `--purge` also removes configuration, metrics, and logs |
 
 The global `--config <PATH>` option loads TOML settings. The local dashboard and report commands
 are TBD — not yet designed.
@@ -159,7 +180,9 @@ are TBD — not yet designed.
 | Network metric collection | Each cycle | Emit non-idle per-interface transfer, packet, error, and rate metrics after warm-up |
 | SQLite writer | Each received batch | Insert the complete batch inside one transaction |
 | Storage maintenance | Checked by the writer after inserts; every 60 seconds by default | Roll up at most 60 complete buckets per tier, apply retention in 10,000-row chunks, then request a passive WAL checkpoint |
-| Graceful shutdown | Ctrl-C or `--samples` limit | Close the channel, drain queued batches, then stop |
+| macOS LaunchAgent supervision | Login load and abnormal exit | Start the installed `run` command and restart after unsuccessful exit, throttled to at most one launch per 10 seconds |
+| Log rotation | Before a write would exceed the configured size | Rename numbered files and retain five rotated 10 MiB files plus the current file by default |
+| Graceful shutdown | Ctrl-C, SIGTERM, or `--samples` limit | Close the channel, drain queued batches, then stop |
 
 Maintenance waits 30 seconds before considering a bucket complete. Raw deletion cannot pass the
 one-minute watermark, and one-minute deletion cannot pass the 15-minute watermark. Maintenance
@@ -168,9 +191,10 @@ generation are TBD — not yet designed.
 
 ## 8. External Service Integrations
 
-The implemented runtime has no external service or network integration. `sysinfo` is the in-process
-platform abstraction for CPU, memory, disk, and network data, and bundled SQLite is compiled with
-the application. Future NVIDIA, AMD, and Apple GPU adapter choices are TBD — not yet designed.
+The implemented runtime has no external network integration. `sysinfo` is the in-process platform
+abstraction for CPU, memory, disk, and network data, and bundled SQLite is compiled with the
+application. On macOS, service commands invoke the local `/bin/launchctl` process and read its
+status output. Future NVIDIA, AMD, and Apple GPU adapter choices are TBD — not yet designed.
 
 ## 9. Database / Data Stores
 
@@ -197,13 +221,28 @@ the server-database observation module does not apply.
 
 ### Environments
 
-Only local development and direct local execution exist. macOS is the first development platform;
-Linux and Windows support are architectural goals but are not yet verified.
+Local development/direct execution and per-user macOS LaunchAgent execution exist. macOS 26 on
+Apple silicon is the verified development platform. Linux and Windows collection remain
+architectural goals but their service managers are not implemented.
 
 ### Deployment Pipeline
 
-TBD — not yet designed. There is no CI, packaged release, macOS LaunchAgent, Linux systemd unit,
-or Windows Service definition yet.
+There is no CI, signed/notarized package, automatic updater, Linux systemd unit, or Windows Service
+definition yet. A local optimized binary can install itself as
+`~/Library/LaunchAgents/com.simple-profiler.agent.plist`. Installation copies the executable and
+creates these per-user locations:
+
+```text
+~/Library/Application Support/SimpleProfiler/bin/simple-profiler
+~/Library/Application Support/SimpleProfiler/config.toml
+~/Library/Application Support/SimpleProfiler/data/simple-profiler.sqlite3
+~/Library/Logs/SimpleProfiler/
+```
+
+Reinstall replaces the executable and plist atomically but preserves an existing configuration.
+Normal uninstall preserves configuration, metrics, and logs; `--purge` is the explicit destructive
+variant. The agent starts on login, restarts only after unsuccessful exit, allows 20 seconds for
+shutdown, and runs as the current user rather than as a system LaunchDaemon.
 
 ### Configuration Hierarchy
 
@@ -217,4 +256,6 @@ Secrets are not currently required. The default database path is `data/simple-pr
 the collection interval is five seconds, and the bounded channel capacity is 128 batches.
 `[sampling]` controls the 60-second disk-capacity interval and idle-I/O suppression. `[retention]`
 controls the 24-hour/30-day/365-day tiers, 60-second maintenance cadence, 30-second late-arrival
-grace, 10,000-row delete chunks, and 60-bucket processing limit.
+grace, 10,000-row delete chunks, and 60-bucket processing limit. `[logging]` optionally selects a
+file and defaults to 10 MiB per file with five retained files. The generated LaunchAgent config
+uses an absolute database path and log path under the per-user directories above.

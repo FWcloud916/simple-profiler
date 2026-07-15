@@ -113,12 +113,15 @@ planned Device entity.
 
 ## 3. Collection Flow
 
-1. [`../src/runtime.rs`](../src/runtime.rs) waits for the Tokio interval.
-2. It creates one `CollectionContext` containing a shared UTC timestamp and optional elapsed time.
+1. [`../src/runtime.rs`](../src/runtime.rs) validates configuration and acquires the advisory lock
+   beside the selected database; a second collector for that database is rejected.
+2. The runtime waits for the Tokio interval and creates one `CollectionContext` containing a shared
+   UTC timestamp and optional elapsed time.
 3. `SystemCollector`, `DiskCollector`, and `NetworkCollector` run sequentially with that context.
 4. Collector failures are logged while successful results are combined into one batch.
 5. A non-empty batch is sent through the bounded channel and committed as one transaction.
-6. If a sample limit was supplied and reached, collection stops after completing that cycle.
+6. A sample limit, Ctrl-C, or SIGTERM stops collection, closes the channel, drains queued batches,
+   and releases the process lock after the writer joins.
 
 The interval uses Tokio's `Skip` missed-tick behavior, so delayed collection does not create a
 burst of catch-up cycles. Disk and network delta/rate metrics are omitted during the first cycle,
@@ -183,10 +186,14 @@ registry for validating names and units is TBD — not yet designed.
 - A collector error is logged, while successful collectors in the same cycle continue to storage.
 - An all-failed cycle does not write an empty batch but still counts toward `--samples`.
 - A closed storage channel stops the run with an error.
+- A second process targeting the same database exits before it creates a channel or writer.
 - A writer panic or database error is returned when the writer task is joined.
 - SQLite transaction failure does not partially commit the affected batch.
 - Rollup rows, cleanup, and watermarks commit in one transaction; a failed maintenance pass does
   not expose a partially advanced watermark.
+- `service stop` sends SIGTERM and fails if the process does not report stopped within 20 seconds.
+- `launchctl` failures include stderr context instead of being reported as successful lifecycle
+  changes.
 
 Per-collector health state, missing-sample markers, and failure events are planned — no schema yet.
 
@@ -198,5 +205,18 @@ N/A — the initial version has no deprecated domain components.
 
 No separate domain maintenance scripts exist. The writer performs rollup and retention maintenance
 internally. The `status` command shows raw/rollup ranges, storage sizes, watermarks, and the last
-maintenance result. Startup applies built-in schema upgrades; manual compaction and repair commands
-are TBD — not yet designed.
+maintenance result. On macOS, the `service` command group implements this lifecycle:
+
+```text
+uninstalled ── install ──► loaded/running
+      ▲                         │
+      └────── uninstall ◄───────┤
+                                ├── stop ──► loaded/stopped ── start ──► loaded/running
+                                └── restart ───────────────────────────► loaded/running
+```
+
+Install and upgrade write the executable and plist atomically and preserve an existing private
+configuration. Status combines parsed `launchctl` state with the latest sample and maintenance
+state. Normal uninstall removes only the service binary/plist; `--purge` also removes
+configuration, metrics, and logs. Startup applies built-in schema upgrades; manual compaction and
+repair commands are TBD — not yet designed.

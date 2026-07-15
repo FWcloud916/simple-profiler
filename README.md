@@ -13,6 +13,8 @@ A local-first Rust service that continuously records system metrics for later di
   days by default.
 - Reports schema version, row counts and time ranges by resolution, database/WAL size, rollup
   watermarks, and maintenance status from the command line.
+- Installs and supervises itself as a per-user macOS LaunchAgent, with graceful shutdown,
+  single-instance protection, service health output, and bounded log rotation.
 
 GPU collection, anomaly detection, diagnostic reports, and the dashboard are planned but are not
 implemented yet.
@@ -49,6 +51,32 @@ Load settings from the tracked example configuration:
 ```bash
 cargo run -- --config config/default.toml run
 ```
+
+### Run in the background on macOS
+
+Build an optimized binary, then explicitly install and start the per-user LaunchAgent:
+
+```bash
+cargo build --release
+target/release/simple-profiler service install
+```
+
+The install command copies the executable, creates a private default configuration when none
+exists, writes `~/Library/LaunchAgents/com.simple-profiler.agent.plist`, and starts the service.
+It changes the current user's macOS service state and SHOULD only be run intentionally.
+
+Inspect or manage it with:
+
+```bash
+target/release/simple-profiler service status
+target/release/simple-profiler service stop
+target/release/simple-profiler service start
+target/release/simple-profiler service restart
+target/release/simple-profiler service uninstall
+```
+
+Normal uninstall preserves configuration, metrics, and logs. The destructive
+`service uninstall --purge` variant removes them too.
 
 ### Test
 

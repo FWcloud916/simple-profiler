@@ -37,18 +37,20 @@ There is no CI configuration yet. The repository's pre-merge gate is the local c
 ### Typed configuration validation
 
 [`../src/config.rs`](../src/config.rs) deserializes into `AppConfig`, applies defaults with
-`#[serde(default)]`, and validates runtime, sampling, and retention settings before work begins.
-Durations and batch limits that must be positive are rejected at zero; retention tiers are checked
-from shortest to longest. New runtime settings SHOULD follow that typed model instead of reading
-environment values inside collectors.
+`#[serde(default)]`, and validates runtime, sampling, logging, and retention settings before work
+begins.
+Durations, log limits, and batch limits that must be positive are rejected at zero; retention
+tiers are checked from shortest to longest. New runtime settings SHOULD follow that typed model
+instead of reading environment values inside collectors.
 
 ### Typed library errors and contextual application errors
 
 [`../src/collector/mod.rs`](../src/collector/mod.rs) uses `thiserror` for the collector boundary.
 [`../src/main.rs`](../src/main.rs), [`../src/runtime.rs`](../src/runtime.rs), and
 [`../src/storage.rs`](../src/storage.rs) use `anyhow::Context` when propagating application-level
-failures. New collector failure categories SHOULD be added to `CollectorError`; operational context
-SHOULD be attached at the caller boundary.
+failures. [`../src/service.rs`](../src/service.rs) also includes failed path or `launchctl` stderr
+context at the operating-system boundary. New collector failure categories SHOULD be added to
+`CollectorError`; operational context SHOULD be attached at the caller boundary.
 
 ### Blocking storage isolation
 
@@ -101,6 +103,14 @@ Documentation MUST distinguish implemented behavior from `planned — no schema 
 - The channel between collection and storage MUST remain bounded.
 - CLI parsing and override precedence belong in `src/main.rs`; reusable behavior belongs in the
   library modules.
+- macOS installation paths, plist rendering, and `launchctl` calls belong in `src/service.rs`.
+- Per-database locking belongs in `src/instance.rs`; every `unsafe` libc call MUST carry a local
+  safety explanation.
+- Log-file creation and bounded rotation belong in `src/logging.rs`; normal collection-cycle logs
+  SHOULD remain at debug level to avoid needless file growth.
+- Installer writes SHOULD use temporary files plus rename. Normal uninstall MUST preserve user
+  configuration, metrics, and logs; destructive purge MUST require an explicit flag and user
+  approval before execution.
 - See [project-overview.md](project-overview.md) §3 for the full runtime flow.
 
 ## 6. Running the Linter (Pre-merge)
