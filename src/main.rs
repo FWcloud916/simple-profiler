@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use simple_profiler::{
     AppConfig, logging, run_profiler,
     service::{ServiceManager, ServiceStatus},
-    storage::Storage,
+    storage::{ProcessSort, Storage},
 };
 
 #[derive(Debug, Parser)]
@@ -53,6 +53,12 @@ enum Command {
         action: EventsCommand,
     },
 
+    /// Inspect the latest resource-heavy processes.
+    Processes {
+        #[command(subcommand)]
+        action: ProcessesCommand,
+    },
+
     /// Install and manage the macOS background service.
     Service {
         #[command(subcommand)]
@@ -82,6 +88,28 @@ enum EventsCommand {
         #[arg(long)]
         database: Option<PathBuf>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProcessesCommand {
+    /// Show the latest top processes by CPU or resident memory.
+    Top {
+        /// Resource used to rank the processes.
+        #[arg(long, value_enum, default_value_t = ProcessSortArg::Cpu)]
+        sort: ProcessSortArg,
+        /// Maximum number of processes to show.
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        /// Override the SQLite database path.
+        #[arg(long)]
+        database: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ProcessSortArg {
+    Cpu,
+    Memory,
 }
 
 #[derive(Debug, Subcommand)]
@@ -139,6 +167,7 @@ async fn main() -> Result<()> {
             print_dataset("raw", &status.raw);
             print_dataset("1 minute", &status.minute);
             print_dataset("15 minute", &status.quarter_hour);
+            print_dataset("process samples", &status.processes);
             println!(
                 "storage: database={} bytes, wal={} bytes, reusable={} bytes",
                 status.database_bytes, status.wal_bytes, status.free_page_bytes
@@ -165,6 +194,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Events { action } => handle_events(action, &mut config),
+        Command::Processes { action } => handle_processes(action, &mut config),
         Command::Service { action } => handle_service(action),
     }
 }
@@ -256,8 +286,91 @@ fn handle_events(action: EventsCommand, config: &mut AppConfig) -> Result<()> {
                     evidence.kind
                 );
             }
+            if !event.process_evidence.is_empty() {
+                println!("related processes:");
+                for evidence in event.process_evidence {
+                    print_process_sample(&evidence.sample, Some(&evidence.kind), None);
+                }
+            }
             Ok(())
         }
+    }
+}
+
+fn handle_processes(action: ProcessesCommand, config: &mut AppConfig) -> Result<()> {
+    match action {
+        ProcessesCommand::Top {
+            sort,
+            limit,
+            database,
+        } => {
+            if !(1..=100).contains(&limit) {
+                anyhow::bail!("--limit must be between 1 and 100");
+            }
+            if let Some(database) = database {
+                config.database_path = database;
+            }
+            let sort = match sort {
+                ProcessSortArg::Cpu => ProcessSort::Cpu,
+                ProcessSortArg::Memory => ProcessSort::Memory,
+            };
+            let storage = Storage::open(&config.database_path)?;
+            let processes = storage.latest_processes(sort, limit)?;
+            if processes.is_empty() {
+                println!("no process snapshots");
+                return Ok(());
+            }
+            println!(
+                "process snapshot: {}",
+                format_time(Some(processes[0].collected_at_ms))
+            );
+            for process in processes {
+                let rank = match sort {
+                    ProcessSort::Cpu => process.cpu_rank,
+                    ProcessSort::Memory => process.memory_rank,
+                };
+                print_process_sample(&process, None, rank);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn print_process_sample(
+    process: &simple_profiler::storage::StoredProcessSample,
+    kind: Option<&str>,
+    rank: Option<u32>,
+) {
+    let prefix = kind.map_or_else(
+        || rank.map_or_else(|| "".to_owned(), |rank| format!("#{rank} ")),
+        |kind| format!("[{kind}] {} ", format_time(Some(process.collected_at_ms))),
+    );
+    println!(
+        "  {prefix}pid={} {} cpu={:.2}% memory={}{}",
+        process.pid,
+        process.name,
+        process.cpu_usage_percent,
+        format_bytes(process.memory_bytes),
+        process
+            .executable_path
+            .as_deref()
+            .map_or_else(String::new, |path| format!(" path={path}"))
+    );
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1_024.0;
+    const MIB: f64 = KIB * 1_024.0;
+    const GIB: f64 = MIB * 1_024.0;
+    let bytes = bytes as f64;
+    if bytes >= GIB {
+        format!("{:.2} GiB", bytes / GIB)
+    } else if bytes >= MIB {
+        format!("{:.2} MiB", bytes / MIB)
+    } else if bytes >= KIB {
+        format!("{:.2} KiB", bytes / KIB)
+    } else {
+        format!("{bytes:.0} B")
     }
 }
 
@@ -330,6 +443,10 @@ fn print_service_data_status(manager: &ServiceManager) -> Result<()> {
     let storage = Storage::open(&config.database_path)?;
     let status = storage.status()?;
     println!("latest sample: {}", format_time(status.raw.newest_ms));
+    println!(
+        "latest process snapshot: {}",
+        format_time(status.processes.newest_ms)
+    );
     println!(
         "last maintenance: {} ({})",
         format_time(status.last_maintenance_ms),

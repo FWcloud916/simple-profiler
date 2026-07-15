@@ -10,6 +10,16 @@ retained_files = 5
 disk_capacity_interval_seconds = 60
 suppress_idle_io = true
 
+[process]
+enabled = true
+interval_seconds = 15
+top_cpu = 10
+top_memory = 10
+raw_retention_hours = 24
+event_top_n = 5
+event_evidence_max_rows = 500
+include_executable_path = false
+
 [retention]
 raw_hours = 24
 minute_days = 30

@@ -3,8 +3,9 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::{
     anomaly::{AnomalyEngine, Evaluation, Phase, RuleState, Severity, StateKey, Transition},
-    config::AnomalyConfig,
-    model::MetricBatch,
+    config::{AnomalyConfig, ProcessConfig},
+    model::{CollectionBatch, MetricBatch},
+    process_storage::{self, ProcessEventEvidence},
 };
 
 const PRELUDE_LIMIT: i64 = 120;
@@ -44,6 +45,7 @@ pub struct EventDetail {
     pub sample_count: i64,
     pub data_gap_count: i64,
     pub evidence: Vec<EventEvidence>,
+    pub process_evidence: Vec<ProcessEventEvidence>,
 }
 
 pub(crate) fn load_engine(
@@ -100,16 +102,24 @@ pub(crate) fn load_engine(
 
 pub(crate) fn insert_batch(
     connection: &mut Connection,
-    batch: &MetricBatch,
+    batch: &CollectionBatch,
     engine: &mut AnomalyEngine,
-    config: &AnomalyConfig,
+    anomaly_config: &AnomalyConfig,
+    process_config: &ProcessConfig,
 ) -> Result<()> {
     let mut next_engine = engine.clone();
-    let evaluations = next_engine.evaluate_batch(batch);
+    let evaluations = next_engine.evaluate_batch(&batch.metrics);
     let transaction = connection.transaction()?;
-    insert_raw_metrics(&transaction, batch)?;
+    insert_raw_metrics(&transaction, &batch.metrics)?;
+    process_storage::insert_samples(&transaction, &batch.processes)?;
     for evaluation in &evaluations {
-        apply_evaluation(&transaction, evaluation, &mut next_engine, config)?;
+        apply_evaluation(
+            &transaction,
+            evaluation,
+            &mut next_engine,
+            anomaly_config,
+            process_config,
+        )?;
     }
     persist_states(&transaction, &next_engine)?;
     transaction.commit()?;
@@ -141,7 +151,8 @@ fn apply_evaluation(
     transaction: &Transaction<'_>,
     evaluation: &Evaluation,
     engine: &mut AnomalyEngine,
-    config: &AnomalyConfig,
+    anomaly_config: &AnomalyConfig,
+    process_config: &ProcessConfig,
 ) -> Result<()> {
     let timestamp_ms = evaluation.metric.collected_at.timestamp_millis();
     if evaluation.transition == Transition::Open {
@@ -184,13 +195,21 @@ fn apply_evaluation(
             ],
         )?;
         let event_id = transaction.last_insert_rowid();
-        insert_prelude(transaction, event_id, evaluation, config)?;
+        insert_prelude(transaction, event_id, evaluation, anomaly_config)?;
         insert_evidence(
             transaction,
             event_id,
             timestamp_ms,
             evaluation.metric.value,
             "trigger",
+        )?;
+        process_storage::capture_open_event(
+            transaction,
+            event_id,
+            &evaluation.metric.name,
+            timestamp_ms,
+            anomaly_config.prelude_minutes,
+            process_config,
         )?;
         engine.attach_event(&evaluation.key, event_id, timestamp_ms);
         return Ok(());
@@ -243,6 +262,16 @@ fn apply_evaluation(
             evaluation.metric.value,
             kind,
         )?;
+        if kind != "peak" {
+            process_storage::capture_checkpoint(
+                transaction,
+                event_id,
+                &evaluation.metric.name,
+                timestamp_ms,
+                kind,
+                process_config,
+            )?;
+        }
     }
     if evaluation.transition == Transition::Close {
         transaction.execute(
@@ -380,6 +409,10 @@ pub(crate) fn delete_closed_events(
             "DELETE FROM anomaly_event_evidence WHERE event_id = ?1",
             [id],
         )?;
+        transaction.execute(
+            "DELETE FROM anomaly_event_process_evidence WHERE event_id = ?1",
+            [id],
+        )?;
         transaction.execute("DELETE FROM anomaly_events WHERE id = ?1", [id])?;
     }
     Ok(ids.len())
@@ -470,6 +503,7 @@ pub(crate) fn get_event(connection: &Connection, id: i64) -> Result<Option<Event
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let process_evidence = process_storage::event_evidence(connection, id)?;
     Ok(Some(EventDetail {
         summary,
         collector,
@@ -483,6 +517,7 @@ pub(crate) fn get_event(connection: &Connection, id: i64) -> Result<Option<Event
         sample_count,
         data_gap_count,
         evidence,
+        process_evidence,
     }))
 }
 

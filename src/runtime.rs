@@ -5,8 +5,12 @@ use chrono::Utc;
 use tokio::{sync::mpsc, time::MissedTickBehavior};
 use tracing::{debug, info, warn};
 
+use crate::model::CollectionBatch;
 use crate::{
-    collector::{CollectionContext, Collector, DiskCollector, NetworkCollector, SystemCollector},
+    collector::{
+        CollectionContext, Collector, DiskCollector, NetworkCollector, ProcessCollector,
+        SystemCollector,
+    },
     config::AppConfig,
     instance::InstanceLock,
     storage::spawn_writer,
@@ -35,10 +39,12 @@ async fn run_with_collectors(
     config.validate()?;
     let _instance_lock = InstanceLock::acquire(&config.database_path)?;
     let (sender, receiver) = mpsc::channel(config.channel_capacity);
+    let mut process_collector = ProcessCollector::new(config.process.clone());
     let writer = spawn_writer(
         &config.database_path,
         config.retention.clone(),
         config.anomaly.clone(),
+        config.process.clone(),
         receiver,
     );
     let mut interval = tokio::time::interval(Duration::from_secs(config.interval_seconds));
@@ -74,12 +80,25 @@ async fn run_with_collectors(
                     }
                 }
 
+                let processes = match process_collector.collect(&context).await {
+                    Ok(Some(snapshot)) => snapshot,
+                    Ok(None) => Vec::new(),
+                    Err(error) => {
+                        warn!(collector = "process", %error, "collection failed");
+                        Vec::new()
+                    }
+                };
                 let metric_count = cycle_batch.len();
-                if !cycle_batch.is_empty() {
-                    sender.send(cycle_batch).await.context("storage writer stopped")?;
+                let process_count = processes.len();
+                let storage_batch = CollectionBatch {
+                    metrics: cycle_batch,
+                    processes,
+                };
+                if !storage_batch.is_empty() {
+                    sender.send(storage_batch).await.context("storage writer stopped")?;
                 }
                 collected_cycles += 1;
-                debug!(collected_cycles, metric_count, "collection cycle completed");
+                debug!(collected_cycles, metric_count, process_count, "collection cycle completed");
 
                 if sample_limit.is_some_and(|limit| collected_cycles >= limit) {
                     break;

@@ -13,6 +13,7 @@ pub struct AppConfig {
     pub retention: RetentionConfig,
     pub logging: LoggingConfig,
     pub anomaly: AnomalyConfig,
+    pub process: ProcessConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +28,34 @@ impl Default for SamplingConfig {
         Self {
             disk_capacity_interval_seconds: 60,
             suppress_idle_io: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProcessConfig {
+    pub enabled: bool,
+    pub interval_seconds: u64,
+    pub top_cpu: usize,
+    pub top_memory: usize,
+    pub raw_retention_hours: u64,
+    pub event_top_n: usize,
+    pub event_evidence_max_rows: usize,
+    pub include_executable_path: bool,
+}
+
+impl Default for ProcessConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_seconds: 15,
+            top_cpu: 10,
+            top_memory: 10,
+            raw_retention_hours: 24,
+            event_top_n: 5,
+            event_evidence_max_rows: 500,
+            include_executable_path: false,
         }
     }
 }
@@ -187,6 +216,7 @@ impl Default for AppConfig {
             retention: RetentionConfig::default(),
             logging: LoggingConfig::default(),
             anomaly: AnomalyConfig::default(),
+            process: ProcessConfig::default(),
         }
     }
 }
@@ -214,6 +244,7 @@ impl AppConfig {
         if self.logging.max_bytes == 0 || self.logging.retained_files == 0 {
             bail!("logging.max_bytes and logging.retained_files must be greater than zero");
         }
+        self.validate_process()?;
         self.validate_anomaly()?;
         if self.retention.raw_hours == 0
             || self.retention.minute_days == 0
@@ -231,6 +262,29 @@ impl AppConfig {
         }
         if self.retention.minute_days.saturating_mul(24) < self.retention.raw_hours {
             bail!("retention.minute_days must not be shorter than raw_hours");
+        }
+        Ok(())
+    }
+
+    fn validate_process(&self) -> Result<()> {
+        let process = &self.process;
+        if process.interval_seconds == 0
+            || process.top_cpu == 0
+            || process.top_memory == 0
+            || process.raw_retention_hours == 0
+            || process.event_top_n == 0
+            || process.event_evidence_max_rows == 0
+        {
+            bail!("process intervals, limits, and retention must be greater than zero");
+        }
+        if process.top_cpu > 100 || process.top_memory > 100 {
+            bail!("process top_cpu and top_memory must not exceed 100");
+        }
+        if process.event_top_n > process.top_cpu.min(process.top_memory) {
+            bail!("process event_top_n must not exceed top_cpu or top_memory");
+        }
+        if process.event_evidence_max_rows < process.event_top_n {
+            bail!("process event_evidence_max_rows must be at least event_top_n");
         }
         Ok(())
     }
@@ -294,5 +348,18 @@ mod tests {
     #[test]
     fn accepts_the_default_retention_hierarchy() {
         assert!(AppConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_unbounded_process_cardinality() {
+        let config = AppConfig {
+            process: ProcessConfig {
+                top_cpu: 101,
+                ..ProcessConfig::default()
+            },
+            ..AppConfig::default()
+        };
+
+        assert!(config.validate().is_err());
     }
 }

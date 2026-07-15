@@ -14,13 +14,15 @@ use tracing::warn;
 use crate::{
     anomaly::AnomalyEngine,
     anomaly_storage,
-    config::{AnomalyConfig, RetentionConfig},
-    model::MetricBatch,
+    config::{AnomalyConfig, ProcessConfig, RetentionConfig},
+    model::{CollectionBatch, MetricBatch},
+    process_storage,
 };
 
 pub use crate::anomaly_storage::{EventDetail, EventEvidence, EventSummary};
+pub use crate::process_storage::{ProcessEventEvidence, ProcessSort, StoredProcessSample};
 
-const CURRENT_SCHEMA_VERSION: i64 = 3;
+const CURRENT_SCHEMA_VERSION: i64 = 4;
 const MINUTE_MS: i64 = 60_000;
 const QUARTER_HOUR_MS: i64 = 900_000;
 const MINUTE_WATERMARK: &str = "rollup_60_watermark_ms";
@@ -116,6 +118,37 @@ CREATE TABLE IF NOT EXISTS anomaly_event_evidence (
     value                REAL NOT NULL,
     kind                 TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS process_samples (
+    id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+    collected_at_ms            INTEGER NOT NULL,
+    pid                        INTEGER NOT NULL,
+    process_start_time_seconds INTEGER NOT NULL,
+    parent_pid                 INTEGER,
+    name                       TEXT NOT NULL,
+    executable_path            TEXT,
+    cpu_usage_percent          REAL NOT NULL,
+    memory_bytes               INTEGER NOT NULL,
+    cpu_rank                   INTEGER,
+    memory_rank                INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS anomaly_event_process_evidence (
+    id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id                   INTEGER NOT NULL,
+    kind                       TEXT NOT NULL,
+    collected_at_ms            INTEGER NOT NULL,
+    pid                        INTEGER NOT NULL,
+    process_start_time_seconds INTEGER NOT NULL,
+    parent_pid                 INTEGER,
+    name                       TEXT NOT NULL,
+    executable_path            TEXT,
+    cpu_usage_percent          REAL NOT NULL,
+    memory_bytes               INTEGER NOT NULL,
+    cpu_rank                   INTEGER,
+    memory_rank                INTEGER,
+    UNIQUE(event_id, collected_at_ms, pid, process_start_time_seconds)
+);
 "#;
 
 const INDEX_SCHEMA: &str = r#"
@@ -133,6 +166,12 @@ CREATE INDEX IF NOT EXISTS idx_anomaly_events_severity_started
     ON anomaly_events(severity, started_at_ms);
 CREATE INDEX IF NOT EXISTS idx_anomaly_event_evidence_event_time
     ON anomaly_event_evidence(event_id, collected_at_ms);
+CREATE INDEX IF NOT EXISTS idx_process_samples_time
+    ON process_samples(collected_at_ms);
+CREATE INDEX IF NOT EXISTS idx_process_samples_identity_time
+    ON process_samples(pid, process_start_time_seconds, collected_at_ms);
+CREATE INDEX IF NOT EXISTS idx_anomaly_event_process_evidence_event_time
+    ON anomaly_event_process_evidence(event_id, collected_at_ms);
 "#;
 
 pub struct Storage {
@@ -153,6 +192,7 @@ pub struct StorageStatus {
     pub raw: DatasetStatus,
     pub minute: DatasetStatus,
     pub quarter_hour: DatasetStatus,
+    pub processes: DatasetStatus,
     pub database_bytes: u64,
     pub wal_bytes: u64,
     pub free_page_bytes: u64,
@@ -220,11 +260,18 @@ impl Storage {
 
     pub fn insert_batch_with_anomalies(
         &mut self,
-        batch: &MetricBatch,
+        batch: &CollectionBatch,
         engine: &mut AnomalyEngine,
-        config: &AnomalyConfig,
+        anomaly_config: &AnomalyConfig,
+        process_config: &ProcessConfig,
     ) -> Result<()> {
-        anomaly_storage::insert_batch(&mut self.connection, batch, engine, config)
+        anomaly_storage::insert_batch(
+            &mut self.connection,
+            batch,
+            engine,
+            anomaly_config,
+            process_config,
+        )
     }
 
     pub fn run_maintenance(
@@ -270,6 +317,7 @@ impl Storage {
         &mut self,
         retention: &RetentionConfig,
         anomaly: &AnomalyConfig,
+        process: &ProcessConfig,
         now: DateTime<Utc>,
     ) -> Result<()> {
         let now_ms = now.timestamp_millis();
@@ -293,12 +341,18 @@ impl Storage {
             retention.delete_batch_rows,
         )?;
         let deleted_events = anomaly_storage::delete_closed_events(&transaction, anomaly, now_ms)?;
+        let deleted_processes = process_storage::delete_expired_samples(
+            &transaction,
+            process,
+            now_ms,
+            retention.delete_batch_rows,
+        )?;
         set_state_integer(&transaction, LAST_MAINTENANCE_MS, now_ms)?;
         set_state_text(
             &transaction,
             LAST_MAINTENANCE_RESULT,
             &format!(
-                "ok: deleted raw={deleted_raw}, minute={deleted_minute}, quarter_hour={deleted_quarter}, events={deleted_events}"
+                "ok: deleted raw={deleted_raw}, minute={deleted_minute}, quarter_hour={deleted_quarter}, processes={deleted_processes}, events={deleted_events}"
             ),
         )?;
         transaction.commit()?;
@@ -315,6 +369,14 @@ impl Storage {
         anomaly_storage::get_event(&self.connection, id)
     }
 
+    pub fn latest_processes(
+        &self,
+        sort: ProcessSort,
+        limit: usize,
+    ) -> Result<Vec<StoredProcessSample>> {
+        process_storage::latest_top(&self.connection, sort, limit)
+    }
+
     pub fn status(&self) -> Result<StorageStatus> {
         let schema_version = self
             .connection
@@ -326,6 +388,11 @@ impl Storage {
         )?;
         let minute = rollup_status(&self.connection, 60)?;
         let quarter_hour = rollup_status(&self.connection, 900)?;
+        let processes = dataset_status(
+            &self.connection,
+            "SELECT COUNT(*), MIN(collected_at_ms), MAX(collected_at_ms) FROM process_samples",
+            [],
+        )?;
         let page_size: i64 = self
             .connection
             .pragma_query_value(None, "page_size", |row| row.get(0))?;
@@ -338,6 +405,7 @@ impl Storage {
             raw,
             minute,
             quarter_hour,
+            processes,
             database_bytes: file_size(&self.path),
             wal_bytes: file_size(&PathBuf::from(format!("{}-wal", self.path.display()))),
             free_page_bytes: u64::try_from(page_size.saturating_mul(free_pages)).unwrap_or(0),
@@ -813,7 +881,8 @@ pub fn spawn_writer(
     path: &Path,
     retention: RetentionConfig,
     anomaly: AnomalyConfig,
-    mut receiver: mpsc::Receiver<MetricBatch>,
+    process: ProcessConfig,
+    mut receiver: mpsc::Receiver<CollectionBatch>,
 ) -> JoinHandle<Result<()>> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -824,11 +893,14 @@ pub fn spawn_writer(
             .checked_sub(maintenance_interval)
             .unwrap_or_else(Instant::now);
         while let Some(batch) = receiver.blocking_recv() {
-            storage.insert_batch_with_anomalies(&batch, &mut anomaly_engine, &anomaly)?;
+            storage.insert_batch_with_anomalies(&batch, &mut anomaly_engine, &anomaly, &process)?;
             if last_maintenance.elapsed() >= maintenance_interval {
-                if let Err(error) =
-                    storage.run_maintenance_with_anomalies(&retention, &anomaly, Utc::now())
-                {
+                if let Err(error) = storage.run_maintenance_with_anomalies(
+                    &retention,
+                    &anomaly,
+                    &process,
+                    Utc::now(),
+                ) {
                     warn!(%error, "storage maintenance failed; collection will continue");
                 }
                 last_maintenance = Instant::now();
@@ -848,7 +920,7 @@ mod tests {
     use super::*;
     use crate::{
         config::{AnomalyConfig, AnomalyRuleConfig},
-        model::Metric,
+        model::{Metric, ProcessSample},
     };
 
     fn at(milliseconds: i64) -> DateTime<Utc> {
@@ -896,6 +968,29 @@ mod tests {
             value,
             "percent",
         )
+    }
+
+    fn process_sample(
+        seconds: i64,
+        pid: u32,
+        name: &str,
+        cpu: f64,
+        memory: u64,
+        cpu_rank: Option<u32>,
+        memory_rank: Option<u32>,
+    ) -> ProcessSample {
+        ProcessSample {
+            collected_at: at(seconds * 1_000),
+            pid,
+            process_start_time_seconds: u64::from(pid) * 10,
+            parent_pid: Some(1),
+            name: name.to_owned(),
+            executable_path: None,
+            cpu_usage_percent: cpu,
+            memory_bytes: memory,
+            cpu_rank,
+            memory_rank,
+        }
     }
 
     #[test]
@@ -1039,10 +1134,137 @@ mod tests {
 
         let storage = Storage::open(&path).expect("migrate storage");
 
-        assert_eq!(storage.status().expect("status").schema_version, 3);
+        assert_eq!(
+            storage.status().expect("status").schema_version,
+            CURRENT_SCHEMA_VERSION
+        );
         assert_eq!(storage.status().expect("status").raw.row_count, 1);
         assert!(table_exists(&storage.connection, "anomaly_events").expect("event table"));
         assert!(table_exists(&storage.connection, "anomaly_states").expect("state table"));
+    }
+
+    #[test]
+    fn upgrades_a_v3_database_with_process_tables() {
+        let directory = tempdir().expect("temp dir");
+        let path = directory.path().join("v3.sqlite3");
+        let storage = Storage::open(&path).expect("initialize storage");
+        storage
+            .connection
+            .execute_batch(
+                "DROP TABLE anomaly_event_process_evidence;
+                 DROP TABLE process_samples;
+                 PRAGMA user_version = 3;",
+            )
+            .expect("rewind to v3");
+        drop(storage);
+
+        let storage = Storage::open(&path).expect("migrate v3 storage");
+
+        assert_eq!(
+            storage.status().expect("status").schema_version,
+            CURRENT_SCHEMA_VERSION
+        );
+        assert!(table_exists(&storage.connection, "process_samples").expect("process table"));
+        assert!(
+            table_exists(&storage.connection, "anomaly_event_process_evidence")
+                .expect("process evidence table")
+        );
+    }
+
+    #[test]
+    fn stores_and_queries_latest_process_rankings() {
+        let directory = tempdir().expect("temp dir");
+        let path = directory.path().join("metrics.sqlite3");
+        let mut storage = Storage::open(&path).expect("open storage");
+        let anomaly = AnomalyConfig::default();
+        let process = ProcessConfig::default();
+        let mut engine = storage.load_anomaly_engine(&anomaly).expect("engine");
+        let batch = CollectionBatch {
+            metrics: Vec::new(),
+            processes: vec![
+                process_sample(10, 10, "cpu-heavy", 150.0, 100, Some(1), Some(2)),
+                process_sample(10, 20, "memory-heavy", 10.0, 2_000, Some(2), Some(1)),
+            ],
+        };
+
+        storage
+            .insert_batch_with_anomalies(&batch, &mut engine, &anomaly, &process)
+            .expect("process snapshot");
+
+        assert_eq!(storage.status().expect("status").processes.row_count, 2);
+        assert_eq!(
+            storage
+                .latest_processes(ProcessSort::Cpu, 1)
+                .expect("cpu top")[0]
+                .name,
+            "cpu-heavy"
+        );
+        assert_eq!(
+            storage
+                .latest_processes(ProcessSort::Memory, 1)
+                .expect("memory top")[0]
+                .name,
+            "memory-heavy"
+        );
+    }
+
+    #[test]
+    fn cpu_event_preserves_bounded_process_evidence_after_raw_process_retention() {
+        let directory = tempdir().expect("temp dir");
+        let path = directory.path().join("metrics.sqlite3");
+        let mut storage = Storage::open(&path).expect("open storage");
+        let anomaly = test_anomaly_config();
+        let process = ProcessConfig {
+            interval_seconds: 5,
+            event_top_n: 1,
+            event_evidence_max_rows: 3,
+            raw_retention_hours: 1,
+            ..ProcessConfig::default()
+        };
+        let mut engine = storage.load_anomaly_engine(&anomaly).expect("engine");
+        for (seconds, value, name) in [(0, 91.0, "p0"), (5, 92.0, "p5"), (10, 93.0, "p10")] {
+            let batch = CollectionBatch {
+                metrics: vec![cpu_metric(seconds, value)],
+                processes: vec![process_sample(
+                    seconds,
+                    u32::try_from(seconds + 10).expect("pid"),
+                    name,
+                    value,
+                    100,
+                    Some(1),
+                    Some(1),
+                )],
+            };
+            storage
+                .insert_batch_with_anomalies(&batch, &mut engine, &anomaly, &process)
+                .expect("sample");
+        }
+        let event_id = storage.list_events(true, 1).expect("events")[0].id;
+        let event = storage.event(event_id).expect("event").expect("open event");
+
+        assert_eq!(event.process_evidence.len(), 3);
+        assert_eq!(event.process_evidence[0].kind, "prelude");
+        assert_eq!(event.process_evidence[2].kind, "trigger");
+
+        storage
+            .run_maintenance_with_anomalies(
+                &test_retention(),
+                &anomaly,
+                &process,
+                at(12 * 60 * 60 * 1_000),
+            )
+            .expect("process retention");
+
+        assert_eq!(storage.status().expect("status").processes.row_count, 0);
+        assert_eq!(
+            storage
+                .event(event_id)
+                .expect("event")
+                .expect("retained event")
+                .process_evidence
+                .len(),
+            3
+        );
     }
 
     #[test]
@@ -1062,7 +1284,12 @@ mod tests {
                 cpu_metric(10, 93.0),
             ] {
                 storage
-                    .insert_batch_with_anomalies(&vec![metric], &mut engine, &config)
+                    .insert_batch_with_anomalies(
+                        &CollectionBatch::metrics_only(vec![metric]),
+                        &mut engine,
+                        &config,
+                        &ProcessConfig::default(),
+                    )
                     .expect("evaluate sample");
             }
             let events = storage.list_events(true, 20).expect("open events");
@@ -1085,7 +1312,12 @@ mod tests {
             cpu_metric(25, 74.0),
         ] {
             storage
-                .insert_batch_with_anomalies(&vec![metric], &mut engine, &config)
+                .insert_batch_with_anomalies(
+                    &CollectionBatch::metrics_only(vec![metric]),
+                    &mut engine,
+                    &config,
+                    &ProcessConfig::default(),
+                )
                 .expect("recovery sample");
         }
 
@@ -1108,19 +1340,41 @@ mod tests {
         let mut storage = Storage::open(&path).expect("open storage");
         let mut config = test_anomaly_config();
         config.event_retention_days = 1;
+        let process = ProcessConfig {
+            interval_seconds: 5,
+            raw_retention_hours: 1,
+            event_top_n: 1,
+            ..ProcessConfig::default()
+        };
         let mut engine = storage
             .load_anomaly_engine(&config)
             .expect("anomaly engine");
-        for metric in [
-            cpu_metric(0, 91.0),
-            cpu_metric(5, 92.0),
-            cpu_metric(10, 93.0),
-            cpu_metric(15, 74.0),
-            cpu_metric(20, 74.0),
-            cpu_metric(25, 74.0),
+        for (seconds, value) in [
+            (0, 91.0),
+            (5, 92.0),
+            (10, 93.0),
+            (15, 74.0),
+            (20, 74.0),
+            (25, 74.0),
         ] {
             storage
-                .insert_batch_with_anomalies(&vec![metric], &mut engine, &config)
+                .insert_batch_with_anomalies(
+                    &CollectionBatch {
+                        metrics: vec![cpu_metric(seconds, value)],
+                        processes: vec![process_sample(
+                            seconds,
+                            u32::try_from(seconds + 100).expect("pid"),
+                            "test-process",
+                            value,
+                            100,
+                            Some(1),
+                            Some(1),
+                        )],
+                    },
+                    &mut engine,
+                    &config,
+                    &process,
+                )
                 .expect("sample");
         }
         let event_id = storage.list_events(false, 20).expect("events")[0].id;
@@ -1132,20 +1386,24 @@ mod tests {
         };
 
         storage
-            .run_maintenance_with_anomalies(&retention, &config, at(12 * 60 * 60 * 1_000))
+            .run_maintenance_with_anomalies(&retention, &config, &process, at(12 * 60 * 60 * 1_000))
             .expect("raw retention");
         assert_eq!(storage.status().expect("status").raw.row_count, 0);
-        assert!(
-            !storage
-                .event(event_id)
-                .expect("event")
-                .expect("retained event")
-                .evidence
-                .is_empty()
-        );
+        assert_eq!(storage.status().expect("status").processes.row_count, 0);
+        let retained_event = storage
+            .event(event_id)
+            .expect("event")
+            .expect("retained event");
+        assert!(!retained_event.evidence.is_empty());
+        assert!(!retained_event.process_evidence.is_empty());
 
         storage
-            .run_maintenance_with_anomalies(&retention, &config, at(2 * 24 * 60 * 60 * 1_000))
+            .run_maintenance_with_anomalies(
+                &retention,
+                &config,
+                &process,
+                at(2 * 24 * 60 * 60 * 1_000),
+            )
             .expect("event retention");
         assert!(storage.event(event_id).expect("event query").is_none());
         let evidence_rows: i64 = storage
@@ -1155,6 +1413,15 @@ mod tests {
             })
             .expect("evidence count");
         assert_eq!(evidence_rows, 0);
+        let process_evidence_rows: i64 = storage
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM anomaly_event_process_evidence",
+                [],
+                |row| row.get(0),
+            )
+            .expect("process evidence count");
+        assert_eq!(process_evidence_rows, 0);
     }
 
     #[test]

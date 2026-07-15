@@ -1,5 +1,6 @@
 mod disk;
 mod network;
+mod process;
 mod system;
 
 use std::time::Duration;
@@ -12,6 +13,7 @@ use crate::model::MetricBatch;
 
 pub use disk::DiskCollector;
 pub use network::NetworkCollector;
+pub use process::ProcessCollector;
 pub use system::SystemCollector;
 
 #[derive(Debug, Clone, Copy)]

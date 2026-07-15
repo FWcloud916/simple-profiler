@@ -5,6 +5,7 @@ pub mod config;
 pub mod instance;
 pub mod logging;
 pub mod model;
+mod process_storage;
 pub mod runtime;
 pub mod service;
 pub mod storage;
