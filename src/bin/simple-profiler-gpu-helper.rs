@@ -17,6 +17,7 @@ struct GpuSnapshot {
 }
 
 fn main() -> Result<()> {
+    // SAFETY: `geteuid` has no arguments, does not dereference memory, and only reads process state.
     if unsafe { libc::geteuid() } != 0 {
         bail!("simple-profiler-gpu-helper must run as root");
     }
@@ -79,6 +80,9 @@ fn parse_powermetrics(source: &[u8]) -> Result<Vec<GpuTotal>> {
     }
     if !parsed {
         bail!("powermetrics returned no property list");
+    }
+    if totals.is_empty() {
+        bail!("powermetrics returned no per-process GPU time fields");
     }
     Ok(totals
         .into_iter()
