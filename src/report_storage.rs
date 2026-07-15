@@ -5,7 +5,7 @@ use chrono::Utc;
 use rusqlite::{Connection, params};
 
 use crate::{
-    anomaly_storage,
+    anomaly_storage, capability_storage,
     report::{
         DashboardSnapshot, MAX_CHART_POINTS, ReportData, ReportPoint, ReportProcessSummary,
         ReportRange, ReportResolution, ReportSeries,
@@ -21,7 +21,12 @@ const REPORT_METRICS: &str = r#"
     'disk.io.read.rate',
     'disk.io.write.rate',
     'network.receive.rate',
-    'network.transmit.rate'
+    'network.transmit.rate',
+    'gpu.device.usage',
+    'gpu.renderer.usage',
+    'gpu.tiler.usage',
+    'gpu.memory.used',
+    'gpu.memory.allocated'
 "#;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -62,6 +67,7 @@ pub(crate) fn load_report(connection: &Connection, range: ReportRange) -> Result
         events,
         events_truncated,
         processes,
+        capabilities: capability_storage::list(connection)?,
     })
 }
 

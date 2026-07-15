@@ -10,7 +10,10 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Local, TimeZone, Utc};
 use serde::Serialize;
 
-use crate::storage::{EventDetail, EventSummary};
+use crate::{
+    model::{CapabilityState, CollectorCapability},
+    storage::{EventDetail, EventSummary},
+};
 
 pub const MAX_REPORT_RANGE_DAYS: i64 = 365;
 pub const MAX_CHART_POINTS: i64 = 1_200;
@@ -123,6 +126,7 @@ pub struct ReportData {
     pub events: Vec<EventDetail>,
     pub events_truncated: bool,
     pub processes: Vec<ReportProcessSummary>,
+    pub capabilities: Vec<CollectorCapability>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -256,12 +260,39 @@ pub fn render_html(data: &ReportData) -> String {
         format_time(data.generated_at_ms)
     );
     render_overview(data, &mut html);
+    render_capabilities(data, &mut html);
     render_series(data, &mut html);
     render_events(data, &mut html);
     render_processes(data, &mut html);
     html.push_str("<footer>Local-only report. Command lines, environments, and working directories are not collected.</footer>");
     html.push_str("</main></body></html>");
     html
+}
+
+fn render_capabilities(data: &ReportData, html: &mut String) {
+    html.push_str("<section><h2>Collector capabilities</h2>");
+    if data.capabilities.is_empty() {
+        html.push_str("<p class=\"empty\">No collector capability status has been recorded yet.</p></section>");
+        return;
+    }
+    html.push_str("<table><thead><tr><th>Resource</th><th>Capability</th><th>State</th><th>Provider</th><th>Detail</th></tr></thead><tbody>");
+    for capability in &data.capabilities {
+        let state = match capability.state {
+            CapabilityState::Available => "available",
+            CapabilityState::Degraded => "degraded",
+            CapabilityState::Unavailable => "unavailable",
+        };
+        let _ = write!(
+            html,
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            escape_html(&capability.resource),
+            escape_html(&metric_label(&capability.capability)),
+            state,
+            escape_html(&capability.provider),
+            escape_html(capability.detail.as_deref().unwrap_or("—")),
+        );
+    }
+    html.push_str("</tbody></table></section>");
 }
 
 fn render_overview(data: &ReportData, html: &mut String) {
@@ -468,6 +499,15 @@ fn metric_label(name: &str) -> String {
         "disk.io.write.rate" => "Disk write rate".to_owned(),
         "network.receive.rate" => "Network receive rate".to_owned(),
         "network.transmit.rate" => "Network transmit rate".to_owned(),
+        "gpu.device.usage" => "GPU usage".to_owned(),
+        "gpu.renderer.usage" => "GPU renderer usage".to_owned(),
+        "gpu.tiler.usage" => "GPU tiler usage".to_owned(),
+        "gpu.memory.used" => "GPU memory in use".to_owned(),
+        "gpu.memory.allocated" => "GPU allocated memory".to_owned(),
+        "gpu.memory.total" => "GPU memory total".to_owned(),
+        "gpu.device.identity" => "GPU identity".to_owned(),
+        "gpu.power" => "GPU power".to_owned(),
+        "gpu.temperature" => "GPU temperature".to_owned(),
         _ => name.to_owned(),
     }
 }

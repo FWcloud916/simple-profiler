@@ -8,8 +8,8 @@ use tracing::{debug, info, warn};
 use crate::model::CollectionBatch;
 use crate::{
     collector::{
-        CollectionContext, Collector, DiskCollector, NetworkCollector, ProcessCollector,
-        SystemCollector,
+        CollectionContext, Collector, DiskCollector, GpuCollector, NetworkCollector,
+        ProcessCollector, SystemCollector,
     },
     config::AppConfig,
     instance::InstanceLock,
@@ -40,6 +40,7 @@ async fn run_with_collectors(
     let _instance_lock = InstanceLock::acquire(&config.database_path)?;
     let (sender, receiver) = mpsc::channel(config.channel_capacity);
     let mut process_collector = ProcessCollector::new(config.process.clone());
+    let mut gpu_collector = GpuCollector::new(config.gpu.clone());
     let writer = spawn_writer(
         &config.database_path,
         config.retention.clone(),
@@ -88,17 +89,30 @@ async fn run_with_collectors(
                         Vec::new()
                     }
                 };
+                let gpu = gpu_collector.collect(&context).await.unwrap_or_default();
+                if let Some(warning) = &gpu.warning {
+                    warn!(collector = "gpu", error = %warning, "collection degraded");
+                }
+                cycle_batch.extend(gpu.metrics);
                 let metric_count = cycle_batch.len();
                 let process_count = processes.len();
+                let capability_count = gpu.capabilities.len();
                 let storage_batch = CollectionBatch {
                     metrics: cycle_batch,
                     processes,
+                    capabilities: gpu.capabilities,
                 };
                 if !storage_batch.is_empty() {
                     sender.send(storage_batch).await.context("storage writer stopped")?;
                 }
                 collected_cycles += 1;
-                debug!(collected_cycles, metric_count, process_count, "collection cycle completed");
+                debug!(
+                    collected_cycles,
+                    metric_count,
+                    process_count,
+                    capability_count,
+                    "collection cycle completed"
+                );
 
                 if sample_limit.is_some_and(|limit| collected_cycles >= limit) {
                     break;
@@ -200,6 +214,10 @@ mod tests {
             database_path: database_path.clone(),
             interval_seconds: 1,
             channel_capacity: 4,
+            gpu: crate::config::GpuConfig {
+                enabled: false,
+                ..crate::config::GpuConfig::default()
+            },
             ..AppConfig::default()
         };
         let collectors: Vec<Box<dyn Collector>> = vec![
@@ -223,6 +241,10 @@ mod tests {
             database_path: database_path.clone(),
             interval_seconds: 1,
             channel_capacity: 4,
+            gpu: crate::config::GpuConfig {
+                enabled: false,
+                ..crate::config::GpuConfig::default()
+            },
             ..AppConfig::default()
         };
         let collectors: Vec<Box<dyn Collector>> = vec![Box::new(UnavailableCollector)];

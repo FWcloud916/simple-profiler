@@ -96,6 +96,8 @@
     const status = state.status;
     const cpu = findSeries("cpu.total.usage");
     const memory = findSeries("memory.usage");
+    const gpu = findSeries("gpu.device.usage");
+    const gpuCapability = findCapability("gpu.device.usage");
     const disks = findAllSeries("disk.space.usage");
     const maxDisk = disks.length ? Math.max(...disks.map((series) => series.max_value)) : null;
     const openEvents = snapshot.events.filter((event) => event.status === "open");
@@ -112,6 +114,12 @@
         value: memory ? formatValue(lastValue(memory), memory.unit) : "No data",
         detail: memory ? `Peak ${formatValue(memory.max_value, memory.unit)}` : "No retained samples",
         state: valueState(memory?.max_value, 90, 95),
+      },
+      {
+        label: "GPU usage",
+        value: gpu ? formatValue(lastValue(gpu), gpu.unit) : gpuCapability ? capabilityLabel(gpuCapability.state) : "No data",
+        detail: gpu ? `Peak ${formatValue(gpu.max_value, gpu.unit)}` : gpuCapability?.detail || "No retained samples",
+        state: gpu && gpuCapability?.state !== "degraded" ? "healthy" : "warning",
       },
       {
         label: "Highest disk usage",
@@ -315,6 +323,7 @@
       ["Raw rows", formatInteger(status.raw.row_count)],
       ["1-minute rows", formatInteger(status.minute.row_count)],
       ["15-minute rows", formatInteger(status.quarter_hour.row_count)],
+      ["Capabilities", capabilitySummary(status.capabilities)],
       ["Schema", `v${status.schema_version}`],
     ];
     const list = element("dl", "health-list");
@@ -402,6 +411,14 @@
 
   function findSeries(metricName) { return state.snapshot.series.find((series) => series.metric_name === metricName); }
   function findAllSeries(metricName) { return state.snapshot.series.filter((series) => series.metric_name === metricName); }
+  function findCapability(name) { return state.status.capabilities.find((capability) => capability.capability === name); }
+  function capabilityLabel(value) { return ({ available: "Available", degraded: "Degraded", unavailable: "Unavailable" })[value] || value; }
+  function capabilitySummary(capabilities) {
+    if (!capabilities.length) return "No data";
+    const available = capabilities.filter((capability) => capability.state === "available").length;
+    const degraded = capabilities.filter((capability) => capability.state === "degraded").length;
+    return degraded ? `${available}/${capabilities.length} available · ${degraded} degraded` : `${available}/${capabilities.length} available`;
+  }
   function lastValue(series) { return series.points.at(-1)?.average_value ?? series.average_value; }
   function valueState(value, warning, critical) { return value == null ? "warning" : value >= critical ? "error" : value >= warning ? "warning" : "healthy"; }
   function clamp(value, min, max) { return Math.min(max, Math.max(min, value)); }
@@ -418,8 +435,8 @@
     if (current.length) segments.push(current);
     return segments;
   }
-  function metricOrder(name) { return ["cpu.total.usage", "memory.usage", "disk.space.usage", "disk.io.read.rate", "disk.io.write.rate", "network.receive.rate", "network.transmit.rate"].indexOf(name); }
-  function metricLabel(name) { return ({ "cpu.total.usage": "CPU usage", "memory.usage": "Memory usage", "disk.space.usage": "Disk space usage", "disk.io.read.rate": "Disk read rate", "disk.io.write.rate": "Disk write rate", "network.receive.rate": "Network receive rate", "network.transmit.rate": "Network transmit rate" })[name] || name; }
+  function metricOrder(name) { const index = ["cpu.total.usage", "memory.usage", "gpu.device.usage", "gpu.renderer.usage", "gpu.tiler.usage", "gpu.memory.used", "gpu.memory.allocated", "disk.space.usage", "disk.io.read.rate", "disk.io.write.rate", "network.receive.rate", "network.transmit.rate"].indexOf(name); return index < 0 ? 999 : index; }
+  function metricLabel(name) { return ({ "cpu.total.usage": "CPU usage", "memory.usage": "Memory usage", "gpu.device.usage": "GPU usage", "gpu.renderer.usage": "GPU renderer usage", "gpu.tiler.usage": "GPU tiler usage", "gpu.memory.used": "GPU memory in use", "gpu.memory.allocated": "GPU allocated memory", "disk.space.usage": "Disk space usage", "disk.io.read.rate": "Disk read rate", "disk.io.write.rate": "Disk write rate", "network.receive.rate": "Network receive rate", "network.transmit.rate": "Network transmit rate" })[name] || name; }
   function resolutionLabel(value) { return ({ raw: "Raw samples", minute: "1-minute rollup", quarter_hour: "15-minute rollup" })[value] || value; }
   function coverageText(oldest, newest) { return oldest == null || newest == null ? "no data" : `${formatTime(oldest)} → ${formatTime(newest)}`; }
   function freshnessLabel(timestamp) {

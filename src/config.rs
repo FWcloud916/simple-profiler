@@ -14,6 +14,35 @@ pub struct AppConfig {
     pub logging: LoggingConfig,
     pub anomaly: AnomalyConfig,
     pub process: ProcessConfig,
+    pub gpu: GpuConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GpuProvider {
+    #[default]
+    Auto,
+    AppleIoreg,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GpuConfig {
+    pub enabled: bool,
+    pub interval_seconds: u64,
+    pub command_timeout_seconds: u64,
+    pub provider: GpuProvider,
+}
+
+impl Default for GpuConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_seconds: 15,
+            command_timeout_seconds: 2,
+            provider: GpuProvider::Auto,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -217,6 +246,7 @@ impl Default for AppConfig {
             logging: LoggingConfig::default(),
             anomaly: AnomalyConfig::default(),
             process: ProcessConfig::default(),
+            gpu: GpuConfig::default(),
         }
     }
 }
@@ -245,6 +275,7 @@ impl AppConfig {
             bail!("logging.max_bytes and logging.retained_files must be greater than zero");
         }
         self.validate_process()?;
+        self.validate_gpu()?;
         self.validate_anomaly()?;
         if self.retention.raw_hours == 0
             || self.retention.minute_days == 0
@@ -262,6 +293,16 @@ impl AppConfig {
         }
         if self.retention.minute_days.saturating_mul(24) < self.retention.raw_hours {
             bail!("retention.minute_days must not be shorter than raw_hours");
+        }
+        Ok(())
+    }
+
+    fn validate_gpu(&self) -> Result<()> {
+        if self.gpu.interval_seconds == 0 || self.gpu.command_timeout_seconds == 0 {
+            bail!("gpu interval and command timeout must be greater than zero");
+        }
+        if self.gpu.command_timeout_seconds > 30 {
+            bail!("gpu.command_timeout_seconds must not exceed 30");
         }
         Ok(())
     }
@@ -356,6 +397,19 @@ mod tests {
             process: ProcessConfig {
                 top_cpu: 101,
                 ..ProcessConfig::default()
+            },
+            ..AppConfig::default()
+        };
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_an_unbounded_gpu_command_timeout() {
+        let config = AppConfig {
+            gpu: GpuConfig {
+                command_timeout_seconds: 31,
+                ..GpuConfig::default()
             },
             ..AppConfig::default()
         };

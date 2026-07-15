@@ -238,6 +238,7 @@ async fn main() -> Result<()> {
                 status.open_critical_count,
                 format_time(status.latest_event_ms)
             );
+            print_capabilities(&status.capabilities);
             Ok(())
         }
         Command::Events { action } => handle_events(action, &mut config),
@@ -287,6 +288,7 @@ fn handle_report(action: ReportCommand, config: &mut AppConfig) -> Result<()> {
             println!("metric series: {}", data.series.len());
             println!("anomaly events: {}", data.events.len());
             println!("processes: {}", data.processes.len());
+            println!("collector capabilities: {}", data.capabilities.len());
             if open {
                 open_report(&output)?;
             }
@@ -556,7 +558,30 @@ fn print_service_data_status(manager: &ServiceManager) -> Result<()> {
         "open anomalies: warning={}, critical={}",
         status.open_warning_count, status.open_critical_count
     );
+    print_capabilities(&status.capabilities);
     Ok(())
+}
+
+fn print_capabilities(capabilities: &[simple_profiler::model::CollectorCapability]) {
+    if capabilities.is_empty() {
+        println!("collector capabilities: no data");
+        return;
+    }
+    println!("collector capabilities:");
+    for capability in capabilities {
+        let detail = capability
+            .detail
+            .as_deref()
+            .map_or_else(String::new, |detail| format!(" ({detail})"));
+        println!(
+            "  {} {} {} via {}{}",
+            capability.resource,
+            capability.capability,
+            capability.state.as_str(),
+            capability.provider,
+            detail
+        );
+    }
 }
 
 fn print_dataset(label: &str, dataset: &simple_profiler::storage::DatasetStatus) {

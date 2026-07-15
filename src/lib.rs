@@ -1,5 +1,6 @@
 pub mod anomaly;
 mod anomaly_storage;
+mod capability_storage;
 pub mod collector;
 pub mod config;
 pub mod dashboard;

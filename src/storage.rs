@@ -14,9 +14,9 @@ use tracing::warn;
 
 use crate::{
     anomaly::AnomalyEngine,
-    anomaly_storage,
+    anomaly_storage, capability_storage,
     config::{AnomalyConfig, ProcessConfig, RetentionConfig},
-    model::{CollectionBatch, MetricBatch},
+    model::{CollectionBatch, CollectorCapability, MetricBatch},
     process_storage,
     report::{DashboardSnapshot, ReportData, ReportRange},
     report_storage,
@@ -25,7 +25,7 @@ use crate::{
 pub use crate::anomaly_storage::{EventDetail, EventEvidence, EventSummary};
 pub use crate::process_storage::{ProcessEventEvidence, ProcessSort, StoredProcessSample};
 
-const CURRENT_SCHEMA_VERSION: i64 = 4;
+const CURRENT_SCHEMA_VERSION: i64 = 5;
 const MINUTE_MS: i64 = 60_000;
 const QUARTER_HOUR_MS: i64 = 900_000;
 const MINUTE_WATERMARK: &str = "rollup_60_watermark_ms";
@@ -152,6 +152,17 @@ CREATE TABLE IF NOT EXISTS anomaly_event_process_evidence (
     memory_rank                INTEGER,
     UNIQUE(event_id, collected_at_ms, pid, process_start_time_seconds)
 );
+
+CREATE TABLE IF NOT EXISTS collector_capabilities (
+    collector       TEXT NOT NULL,
+    resource        TEXT NOT NULL DEFAULT '',
+    capability      TEXT NOT NULL,
+    state           TEXT NOT NULL,
+    provider        TEXT NOT NULL,
+    detail          TEXT,
+    checked_at_ms   INTEGER NOT NULL,
+    PRIMARY KEY (collector, resource, capability)
+);
 "#;
 
 const INDEX_SCHEMA: &str = r#"
@@ -206,6 +217,7 @@ pub struct StorageStatus {
     pub open_warning_count: i64,
     pub open_critical_count: i64,
     pub latest_event_ms: Option<i64>,
+    pub capabilities: Vec<CollectorCapability>,
 }
 
 impl Storage {
@@ -463,6 +475,7 @@ impl Storage {
                 [],
                 |row| row.get(0),
             )?,
+            capabilities: capability_storage::list(&self.connection)?,
         })
     }
 }
@@ -955,7 +968,7 @@ mod tests {
     use super::*;
     use crate::{
         config::{AnomalyConfig, AnomalyRuleConfig},
-        model::{Metric, ProcessSample},
+        model::{CapabilityState, CollectorCapability, Metric, ProcessSample},
     };
 
     fn at(milliseconds: i64) -> DateTime<Utc> {
@@ -1207,6 +1220,64 @@ mod tests {
     }
 
     #[test]
+    fn upgrades_a_v4_database_with_capability_table() {
+        let directory = tempdir().expect("temp dir");
+        let path = directory.path().join("v4.sqlite3");
+        let storage = Storage::open(&path).expect("initialize storage");
+        storage
+            .connection
+            .execute_batch("DROP TABLE collector_capabilities; PRAGMA user_version = 4;")
+            .expect("rewind to v4");
+        drop(storage);
+
+        let storage = Storage::open(&path).expect("migrate v4 storage");
+
+        assert_eq!(
+            storage.status().expect("status").schema_version,
+            CURRENT_SCHEMA_VERSION
+        );
+        assert!(
+            table_exists(&storage.connection, "collector_capabilities").expect("capability table")
+        );
+    }
+
+    #[test]
+    fn capability_updates_commit_with_the_collection_batch() {
+        let directory = tempdir().expect("temp dir");
+        let path = directory.path().join("capabilities.sqlite3");
+        let mut storage = Storage::open(&path).expect("open storage");
+        let anomaly = AnomalyConfig::default();
+        let process = ProcessConfig::default();
+        let mut engine = storage.load_anomaly_engine(&anomaly).expect("engine");
+        let capability = CollectorCapability {
+            collector: "gpu".to_owned(),
+            resource: "Apple GPU 0".to_owned(),
+            capability: "gpu.device.usage".to_owned(),
+            state: CapabilityState::Available,
+            provider: "apple_ioreg".to_owned(),
+            detail: None,
+            checked_at_ms: 1_000,
+        };
+
+        storage
+            .insert_batch_with_anomalies(
+                &CollectionBatch {
+                    capabilities: vec![capability.clone()],
+                    ..CollectionBatch::default()
+                },
+                &mut engine,
+                &anomaly,
+                &process,
+            )
+            .expect("capability batch");
+
+        assert_eq!(
+            storage.status().expect("status").capabilities,
+            vec![capability]
+        );
+    }
+
+    #[test]
     fn stores_and_queries_latest_process_rankings() {
         let directory = tempdir().expect("temp dir");
         let path = directory.path().join("metrics.sqlite3");
@@ -1220,6 +1291,7 @@ mod tests {
                 process_sample(10, 10, "cpu-heavy", 150.0, 100, Some(1), Some(2)),
                 process_sample(10, 20, "memory-heavy", 10.0, 2_000, Some(2), Some(1)),
             ],
+            capabilities: Vec::new(),
         };
 
         storage
@@ -1274,6 +1346,7 @@ mod tests {
                         Some(1),
                         Some(1),
                     )],
+                    capabilities: Vec::new(),
                 },
                 &mut engine,
                 &anomaly,
@@ -1345,6 +1418,7 @@ mod tests {
                     Some(1),
                     Some(1),
                 )],
+                capabilities: Vec::new(),
             };
             storage
                 .insert_batch_with_anomalies(&batch, &mut engine, &anomaly, &process)
@@ -1481,6 +1555,7 @@ mod tests {
                             Some(1),
                             Some(1),
                         )],
+                        capabilities: Vec::new(),
                     },
                     &mut engine,
                     &config,
@@ -1636,7 +1711,10 @@ mod tests {
 
         assert_eq!(snapshot.series.len(), 1);
         assert_eq!(snapshot.series[0].average_value, 42.0);
-        assert_eq!(read_only.status().expect("status").schema_version, 4);
+        assert_eq!(
+            read_only.status().expect("status").schema_version,
+            CURRENT_SCHEMA_VERSION
+        );
     }
 
     #[test]

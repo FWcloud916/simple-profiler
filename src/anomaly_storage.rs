@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use crate::{
     anomaly::{AnomalyEngine, Evaluation, Phase, RuleState, Severity, StateKey, Transition},
+    capability_storage,
     config::{AnomalyConfig, ProcessConfig},
     model::{CollectionBatch, MetricBatch},
     process_storage::{self, ProcessEventEvidence},
@@ -113,6 +114,7 @@ pub(crate) fn insert_batch(
     let transaction = connection.transaction()?;
     insert_raw_metrics(&transaction, &batch.metrics)?;
     process_storage::insert_samples(&transaction, &batch.processes)?;
+    capability_storage::upsert(&transaction, &batch.capabilities)?;
     for evaluation in &evaluations {
         apply_evaluation(
             &transaction,

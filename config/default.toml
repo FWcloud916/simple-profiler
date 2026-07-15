@@ -20,6 +20,12 @@ event_top_n = 5
 event_evidence_max_rows = 500
 include_executable_path = false
 
+[gpu]
+enabled = true
+interval_seconds = 15
+command_timeout_seconds = 2
+provider = "auto"
+
 [retention]
 raw_hours = 24
 minute_days = 30

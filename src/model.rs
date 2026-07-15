@@ -66,10 +66,51 @@ pub struct ProcessSample {
 
 pub type ProcessSnapshot = Vec<ProcessSample>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityState {
+    Available,
+    Degraded,
+    Unavailable,
+}
+
+impl CapabilityState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Degraded => "degraded",
+            Self::Unavailable => "unavailable",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "available" => Some(Self::Available),
+            "degraded" => Some(Self::Degraded),
+            "unavailable" => Some(Self::Unavailable),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollectorCapability {
+    pub collector: String,
+    pub resource: String,
+    pub capability: String,
+    pub state: CapabilityState,
+    pub provider: String,
+    pub detail: Option<String>,
+    pub checked_at_ms: i64,
+}
+
+pub type CapabilityBatch = Vec<CollectorCapability>;
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CollectionBatch {
     pub metrics: MetricBatch,
     pub processes: ProcessSnapshot,
+    pub capabilities: CapabilityBatch,
 }
 
 impl CollectionBatch {
@@ -77,10 +118,11 @@ impl CollectionBatch {
         Self {
             metrics,
             processes: Vec::new(),
+            capabilities: Vec::new(),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.metrics.is_empty() && self.processes.is_empty()
+        self.metrics.is_empty() && self.processes.is_empty() && self.capabilities.is_empty()
     }
 }

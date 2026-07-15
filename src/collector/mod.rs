@@ -1,4 +1,5 @@
 mod disk;
+mod gpu;
 mod network;
 mod process;
 mod system;
@@ -12,6 +13,7 @@ use thiserror::Error;
 use crate::model::MetricBatch;
 
 pub use disk::DiskCollector;
+pub use gpu::{GpuCollection, GpuCollector};
 pub use network::NetworkCollector;
 pub use process::ProcessCollector;
 pub use system::SystemCollector;
