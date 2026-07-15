@@ -305,7 +305,8 @@ fn parse_nettop(source: &str) -> Result<HashMap<u32, NetworkTotals>, String> {
         .map(str::trim)
         .filter(|line| !line.is_empty())
     {
-        if line.starts_with("time,") {
+        let line = line.trim_end_matches(',');
+        if line.starts_with("time,") || line.starts_with(",bytes_in,") {
             continue;
         }
         let mut fields = line.rsplitn(3, ',');
@@ -741,7 +742,7 @@ mod tests {
 
     #[test]
     fn parses_nettop_rows_using_pid_even_when_name_contains_spaces() {
-        let totals = parse_nettop("time,bytes_in,bytes_out\nCodex (Service).1931,685324,1684779\n")
+        let totals = parse_nettop(",bytes_in,bytes_out,\nCodex (Service).1931,685324,1684779,\n")
             .expect("nettop");
         assert_eq!(totals[&1931].received, 685_324);
         assert_eq!(totals[&1931].transmitted, 1_684_779);
