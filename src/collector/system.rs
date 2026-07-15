@@ -1,8 +1,7 @@
 use async_trait::async_trait;
-use chrono::Utc;
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 
-use super::{Collector, CollectorError};
+use super::{CollectionContext, Collector, CollectorError};
 use crate::model::{Metric, MetricBatch};
 
 pub struct SystemCollector {
@@ -32,11 +31,14 @@ impl Collector for SystemCollector {
         "system"
     }
 
-    async fn collect(&mut self) -> Result<MetricBatch, CollectorError> {
+    async fn collect(
+        &mut self,
+        context: &CollectionContext,
+    ) -> Result<MetricBatch, CollectorError> {
         self.system.refresh_cpu_usage();
         self.system.refresh_memory();
 
-        let collected_at = Utc::now();
+        let collected_at = context.collected_at;
         let mut metrics = Vec::with_capacity(self.system.cpus().len() + 5);
         metrics.push(Metric::new(
             collected_at,
@@ -110,7 +112,11 @@ mod tests {
     #[tokio::test]
     async fn collects_cpu_and_memory_metrics() {
         let mut collector = SystemCollector::new();
-        let metrics = collector.collect().await.expect("system metrics");
+        let context = CollectionContext {
+            collected_at: chrono::Utc::now(),
+            elapsed: None,
+        };
+        let metrics = collector.collect(&context).await.expect("system metrics");
 
         assert!(
             metrics

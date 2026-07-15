@@ -22,7 +22,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Collect CPU and memory metrics until interrupted.
+    /// Collect CPU, memory, disk, and network metrics until interrupted.
     Run {
         /// Override the SQLite database path.
         #[arg(long)]
