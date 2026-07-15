@@ -5,12 +5,17 @@ A local-first Rust service that continuously records system metrics for later di
 ## What it does
 
 - Collects CPU, memory, disk capacity/I/O, and network transfer metrics at a configurable interval.
+- Suppresses idle disk/network I/O by default and samples disk capacity every 60 seconds to limit
+  storage growth.
 - Combines successful collectors into one cycle batch and sends it through a bounded channel.
 - Stores timestamped, resource-aware samples in a local SQLite database using one WAL writer.
-- Reports the number and time range of stored samples from the command line.
+- Retains raw samples for 24 hours, one-minute rollups for 30 days, and 15-minute rollups for 365
+  days by default.
+- Reports schema version, row counts and time ranges by resolution, database/WAL size, rollup
+  watermarks, and maintenance status from the command line.
 
-GPU, anomaly detection, retention, reports, and the dashboard are planned but are not implemented
-yet.
+GPU collection, anomaly detection, diagnostic reports, and the dashboard are planned but are not
+implemented yet.
 
 ## Quickstart
 

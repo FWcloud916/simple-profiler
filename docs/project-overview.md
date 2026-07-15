@@ -16,8 +16,8 @@
 
 Simple Profiler continuously samples host resource metrics, persists them locally, and will
 eventually turn selected time ranges into diagnostic reports. The implemented MVP collects CPU,
-memory, disk, and network measurements and writes them to SQLite. GPU, anomaly detection,
-retention, reports, and a local dashboard are planned.
+memory, disk, and network measurements, writes raw data to SQLite, and maintains one-minute and
+15-minute retention tiers. GPU, anomaly detection, reports, and a local dashboard are planned.
 
 ### 1.2 Relationship with Other Systems
 
@@ -28,7 +28,7 @@ vendor-specific adapters, but their exact APIs are not yet designed.
 ### 1.3 Deprecated / Retired or Not-Yet-Enabled Features
 
 - **Not yet enabled:** GPU, process, temperature, and power collectors.
-- **Not yet enabled:** rollups, retention, anomaly events, reports, and the dashboard.
+- **Not yet enabled:** anomaly events, reports, and the dashboard.
 - No deprecated features exist in the initial version.
 
 ## 2. Tech Stack
@@ -67,20 +67,25 @@ Tokio interval ──► shared CollectionContext
                          bounded mpsc channel
                                    │
                                    ▼
-                      blocking SQLite WAL writer
+                blocking SQLite WAL writer/maintainer
+                         │              │
+                         ├── raw rows   └── 1m / 15m rollups
 ```
 
 The CLI assembles configuration and chooses an operation. `run` starts all collectors and the
-storage writer; `status` opens the same SQLite database and reads its sample count and time range.
-Each cycle supplies one UTC timestamp and elapsed monotonic duration to every collector. Successful
-results are combined into one transaction; one unavailable collector does not discard the others.
-Disk and network rate metrics warm up for one cycle before emission.
+storage writer; `status` opens the same SQLite database and summarizes each retention tier,
+database/WAL size, rollup watermarks, and the last maintenance result. Each cycle supplies one UTC
+timestamp and elapsed monotonic duration to every collector. Successful results are combined into
+one transaction; one unavailable collector does not discard the others. Disk and network rate
+metrics warm up for one cycle. By default, fully idle I/O series are omitted and missing intervals
+therefore mean zero activity; disk capacity is emitted every 60 seconds.
 
 ### Key Principles
 
 - Collectors MUST only collect and normalize measurements; they do not write storage directly.
 - The collector-to-storage channel MUST remain bounded so slow storage creates backpressure.
 - One writer task owns the SQLite connection to avoid write-lock contention.
+- Rollup, retention deletion, and WAL checkpoint work MUST stay on that same writer task.
 - Blocking database work runs outside Tokio's asynchronous worker threads.
 - A collector failure SHOULD be isolated and logged without corrupting already stored data.
 - Implemented and planned capabilities MUST be labeled separately.
@@ -118,17 +123,19 @@ are TBD — not yet designed.
 
 ## 5. Domain Models (High-Level)
 
-The current persistent model is a timestamped metric sample. Each collection cycle produces one
-transient batch containing the results from every successful collector. Disk and network samples
-use the optional `resource` field for a mount point or interface name.
+The persistent models are timestamped raw metric samples, time-bucket rollups, and maintenance
+watermarks. Each collection cycle produces one transient batch containing the results from every
+successful collector. Disk and network samples use the optional `resource` field for a mount point
+or interface name.
 
 ```text
 CollectionCycle 1──* MetricSample
+MetricSample    *──* MetricRollup (derived by series and time bucket; no foreign key)
 ```
 
 The `CollectionCycle` boundary currently exists only as an in-memory `MetricBatch`; it is not a
-database table. Planned diagnostic entities include Device, Event, Rollup, and Report, but no
-schema exists for them. See [domain-models.md](domain-models.md) for status and field details.
+database table. Device, Event, and Report remain planned diagnostic entities without schemas. See
+[domain-models.md](domain-models.md) for status and field details.
 
 ## 6. API / Interface Structure
 
@@ -137,7 +144,7 @@ Simple Profiler has a CLI interface and no HTTP interface yet.
 | Command | Purpose | Important options |
 |---|---|---|
 | `simple-profiler run` | Collect CPU, memory, disk, and network metrics until interrupted or a sample limit is reached | `--database`, `--interval-seconds`, `--samples` |
-| `simple-profiler status` | Print database path, metric row count, and stored time range | `--database` |
+| `simple-profiler status` | Print schema, per-tier row counts/ranges, file sizes, watermarks, and maintenance result | `--database` |
 
 The global `--config <PATH>` option loads TOML settings. The local dashboard and report commands
 are TBD — not yet designed.
@@ -148,13 +155,16 @@ are TBD — not yet designed.
 |---|---|---|
 | Collection cycle | Tokio interval; five seconds by default | Create one shared timestamp/elapsed context, run all collectors, and combine successful results |
 | System metric collection | Each cycle | Refresh total/per-core CPU and memory metrics |
-| Disk metric collection | Each cycle | Refresh capacity every cycle; emit I/O delta and rate after one warm-up cycle |
-| Network metric collection | Each cycle | Emit per-interface transfer, packet, error, and rate metrics after one warm-up cycle |
+| Disk metric collection | Each cycle | Emit capacity every 60 seconds by default; emit non-idle I/O delta/rate after warm-up |
+| Network metric collection | Each cycle | Emit non-idle per-interface transfer, packet, error, and rate metrics after warm-up |
 | SQLite writer | Each received batch | Insert the complete batch inside one transaction |
+| Storage maintenance | Checked by the writer after inserts; every 60 seconds by default | Roll up at most 60 complete buckets per tier, apply retention in 10,000-row chunks, then request a passive WAL checkpoint |
 | Graceful shutdown | Ctrl-C or `--samples` limit | Close the channel, drain queued batches, then stop |
 
-Data rollup, retention cleanup, event evaluation, and scheduled report generation are TBD — not
-yet designed.
+Maintenance waits 30 seconds before considering a bucket complete. Raw deletion cannot pass the
+one-minute watermark, and one-minute deletion cannot pass the 15-minute watermark. Maintenance
+errors are logged without stopping later collection. Event evaluation and scheduled report
+generation are TBD — not yet designed.
 
 ## 8. External Service Integrations
 
@@ -165,18 +175,23 @@ the application. Future NVIDIA, AMD, and Apple GPU adapter choices are TBD — n
 ## 9. Database / Data Stores
 
 The application owns one client-embedded SQLite database. [`../src/storage.rs`](../src/storage.rs)
-creates and upgrades the schema transactionally using SQLite `user_version`. Schema version 1 adds
-resource identity while preserving rows from the original unversioned schema.
+creates and upgrades the schema transactionally using SQLite `user_version`. Schema version 2
+adds an integer millisecond timestamp to raw samples, backfills v1 rows, and creates rollup and
+maintenance-state tables.
 
 | Table | Purpose | Indexes |
 |---|---|---|
-| `metric_samples` | One normalized measurement per timestamp, collector, optional resource, metric name, value, and unit | `collected_at`; `(metric_name, collected_at)`; `(metric_name, resource, collected_at)` |
+| `metric_samples` | One normalized raw measurement with RFC 3339 and millisecond timestamps | `collected_at_ms`; `(metric_name, collected_at_ms)`; `(metric_name, resource, collected_at_ms)` |
+| `metric_rollups` | One aggregate per resolution, bucket, collector, normalized resource, and metric name | Composite primary key plus `(resolution_seconds, bucket_start_ms)` |
+| `maintenance_state` | Integer/text watermarks and the last maintenance result | Primary key on `key` |
 
 SQLite runs in WAL mode with a five-second busy timeout. Metric batches are written inside a
-transaction. Retention duration, rollup tables, and database size limits are TBD — not yet
-designed. Schema versioning itself is implemented; the next version number will be assigned when
-another migration is required. Because this is an embedded local store, the server-database
-observation module does not apply.
+transaction. Rollups store sample count, minimum, maximum, sum, weighted average, and last value.
+One-minute rollups are derived from raw samples; 15-minute rollups combine one-minute statistics
+without averaging averages. Upserts make completed buckets safe to recompute. Defaults retain raw
+rows for 24 hours, one-minute rows for 30 days, and 15-minute rows for 365 days. Cleanup leaves
+reusable SQLite pages and does not run automatic `VACUUM`. Because this is an embedded local store,
+the server-database observation module does not apply.
 
 ## 10. Environments & Deployment
 
@@ -198,6 +213,8 @@ Configuration precedence is:
 2. A TOML file passed with `--config`
 3. Built-in defaults matching [`../config/default.toml`](../config/default.toml)
 
-Secrets are not currently required. The default database path is
-`data/simple-profiler.sqlite3`, the interval is five seconds, and the bounded channel capacity is
-128 batches.
+Secrets are not currently required. The default database path is `data/simple-profiler.sqlite3`,
+the collection interval is five seconds, and the bounded channel capacity is 128 batches.
+`[sampling]` controls the 60-second disk-capacity interval and idle-I/O suppression. `[retention]`
+controls the 24-hour/30-day/365-day tiers, 60-second maintenance cadence, 30-second late-arrival
+grace, 10,000-row delete chunks, and 60-bucket processing limit.

@@ -39,6 +39,7 @@ transaction boundary but has no database identifier or table.
 |---|---|---|
 | `id` | `INTEGER` | Auto-incremented primary key |
 | `collected_at` | `TEXT` | UTC RFC 3339 timestamp |
+| `collected_at_ms` | `INTEGER` | UTC Unix timestamp in milliseconds for range queries and buckets |
 | `collector` | `TEXT` | Producing collector name |
 | `resource` | `TEXT`, nullable | Mount point or interface name; existing CPU/memory rows remain `NULL` |
 | `metric_name` | `TEXT` | Normalized hierarchical name |
@@ -47,8 +48,34 @@ transaction boundary but has no database identifier or table.
 
 ### StorageStatus
 
-**Status: implemented, read model.** Contains total metric row count and optional oldest/newest
-timestamps returned by the `status` command. It is not persisted separately.
+**Status: implemented, read model.** Contains schema version; row count and optional oldest/newest
+time for raw, one-minute, and 15-minute data; database/WAL/reusable-page sizes; both rollup
+watermarks; and the last maintenance time/result. It is not persisted as one object.
+
+### MetricRollup
+
+**Status: implemented in SQLite.** One `metric_rollups` row describes a metric series within a
+one-minute or 15-minute bucket.
+
+| Column | Meaning |
+|---|---|
+| `bucket_start_ms` | UTC bucket boundary in Unix milliseconds |
+| `resolution_seconds` | `60` or `900` |
+| `collector`, `resource`, `metric_name`, `unit` | Series identity; missing raw resources normalize to an empty string |
+| `sample_count` | Number of raw observations represented |
+| `min_value`, `max_value` | Observed extremes |
+| `sum_value` | Sum of represented observations; the primary interpretation for delta metrics |
+| `average_value` | `sum_value / sample_count`; 15-minute values use combined counts and sums |
+| `last_value` | Latest value represented by the bucket |
+
+The primary key is resolution, bucket, collector, normalized resource, and metric name. Upserts
+replace a recomputed bucket, so processing the same completed range again is idempotent.
+
+### MaintenanceState
+
+**Status: implemented in SQLite.** `maintenance_state` stores integer or text values by key. It
+currently carries the next one-minute and 15-minute bucket watermarks plus the last maintenance
+time and result.
 
 ### Device
 
@@ -61,11 +88,6 @@ TBD — not yet designed.
 **Status: planned — no schema yet.** Will represent a bounded abnormal period with severity,
 trigger evidence, and related metrics. Thresholds and lifecycle states are TBD — not yet designed.
 
-### Rollup
-
-**Status: planned — no schema yet.** Will retain aggregate values for longer periods after raw
-samples expire. Windows and aggregate fields are TBD — not yet designed.
-
 ### Report
 
 **Status: planned — no schema yet.** Will record requested diagnostic time ranges and generated
@@ -77,15 +99,17 @@ Solid relationships are implemented; dotted descriptions are planned only.
 
 ```text
 CollectionCycle (transient) 1──* MetricSample
+MetricSample *──* MetricRollup   (derived by matching series and time bucket; no foreign key)
+MaintenanceState ── stores ──► one-minute and 15-minute watermark keys
 
 Device 1··* MetricSample     (planned — no schema yet)
 Event  *··* MetricSample     (planned — no schema yet)
-Rollup *··1 MetricName       (planned — no schema yet)
 Report 1··* Event            (planned — no schema yet)
 ```
 
-The current schema does not persist a collection-cycle ID, device ID, event ID, or report ID.
-`resource` is descriptive text and is not a foreign key to the planned Device entity.
+The schema does not persist a collection-cycle ID, device ID, event ID, report ID, or foreign keys
+between samples and rollups. `resource` is descriptive text and is not a foreign key to the
+planned Device entity.
 
 ## 3. Collection Flow
 
@@ -98,7 +122,10 @@ The current schema does not persist a collection-cycle ID, device ID, event ID, 
 
 The interval uses Tokio's `Skip` missed-tick behavior, so delayed collection does not create a
 burst of catch-up cycles. Disk and network delta/rate metrics are omitted during the first cycle,
-when no reliable elapsed duration exists; disk capacity metrics are still emitted.
+when no reliable elapsed duration exists. Disk capacity is emitted on the first cycle and then at
+its configured interval (60 seconds by default). With idle suppression enabled, a disk with zero
+read/write bytes or a network interface whose counters are all zero emits no I/O metrics; rollup
+consumers interpret those missing delta intervals as zero activity.
 
 ## 4. Storage Flow
 
@@ -106,14 +133,22 @@ when no reliable elapsed duration exists; disk capacity metrics are still emitte
 2. Opening storage creates parent directories, enables WAL, sets a busy timeout, and runs the
    transactional schema upgrade.
 3. Each received `MetricBatch` is inserted inside one SQLite transaction.
-4. Shutdown drops the sender, drains queued batches, commits them, and joins the writer task.
+4. At the configured cadence, the same writer transaction recomputes up to the configured number
+   of complete one-minute buckets, then derives complete 15-minute buckets from them.
+5. That transaction advances watermarks and deletes expired rows in bounded chunks, never deleting
+   data that its downstream tier has not processed.
+6. After commit, storage requests a passive WAL checkpoint. Automatic `VACUUM` is not performed.
+7. Shutdown drops the sender, drains queued batches, commits them, and joins the writer task.
 
-Schema version 1 adds nullable `resource` to the original unversioned table, creates its composite
-index, and preserves existing rows. A database newer than the supported version is rejected rather
-than opened with an incompatible writer.
+Schema version 2 adds `collected_at_ms`, backfills v1 timestamps, and creates `metric_rollups` and
+`maintenance_state`. A database newer than the supported version is rejected rather than opened
+with an incompatible writer. Rollup buckets wait for the configured late-arrival grace period.
+One-minute aggregation reads raw rows in timestamp/ID order; 15-minute aggregation combines counts,
+sums, extremes, and the latest child value so averages remain weighted.
 
-The runtime treats an unexpectedly stopped writer as an application error. Retry and quarantine
-behavior for failed batches is TBD — not yet designed.
+The runtime treats an unexpectedly stopped writer as an application error. Maintenance errors are
+logged and do not stop collection. Retry and quarantine behavior for failed inserts is TBD — not
+yet designed.
 
 ## 5. Metric Naming
 
@@ -127,28 +162,31 @@ The implemented names are:
 | `memory.used` | `bytes` | One per cycle |
 | `memory.available` | `bytes` | One per cycle |
 | `memory.usage` | `percent` | One per cycle |
-| `disk.space.total` | `bytes` | One per mount point per cycle |
-| `disk.space.available` | `bytes` | One per mount point per cycle |
-| `disk.space.used` | `bytes` | One per mount point per cycle |
-| `disk.space.usage` | `percent` | One per mount point per cycle |
-| `disk.io.<read\|write>.delta` | `bytes` | One per mount point after warm-up |
-| `disk.io.<read\|write>.rate` | `bytes_per_second` | One per mount point after warm-up |
-| `network.<receive\|transmit>.delta` | `bytes` | One per interface after warm-up |
-| `network.<receive\|transmit>.rate` | `bytes_per_second` | One per interface after warm-up |
-| `network.<receive\|transmit>.packets.delta` | `packets` | One per interface after warm-up |
-| `network.<receive\|transmit>.errors.delta` | `errors` | One per interface after warm-up |
+| `disk.space.total` | `bytes` | One per mount point at the capacity interval |
+| `disk.space.available` | `bytes` | One per mount point at the capacity interval |
+| `disk.space.used` | `bytes` | One per mount point at the capacity interval |
+| `disk.space.usage` | `percent` | One per mount point at the capacity interval |
+| `disk.io.<read\|write>.delta` | `bytes` | One per active mount point after warm-up |
+| `disk.io.<read\|write>.rate` | `bytes_per_second` | One per active mount point after warm-up |
+| `network.<receive\|transmit>.delta` | `bytes` | One per active interface after warm-up |
+| `network.<receive\|transmit>.rate` | `bytes_per_second` | One per active interface after warm-up |
+| `network.<receive\|transmit>.packets.delta` | `packets` | One per active interface after warm-up |
+| `network.<receive\|transmit>.errors.delta` | `errors` | One per active interface after warm-up |
 
 New collectors SHOULD follow dot-separated, stable names and MUST attach an explicit unit. A
 registry for validating names and units is TBD — not yet designed.
 
 ## 6. Failure Behavior
 
-- Invalid interval or channel capacity is rejected before the runtime starts.
+- Invalid sampling/retention values, interval, channel capacity, or retention-tier ordering are
+  rejected before the runtime starts.
 - A collector error is logged, while successful collectors in the same cycle continue to storage.
 - An all-failed cycle does not write an empty batch but still counts toward `--samples`.
 - A closed storage channel stops the run with an error.
 - A writer panic or database error is returned when the writer task is joined.
 - SQLite transaction failure does not partially commit the affected batch.
+- Rollup rows, cleanup, and watermarks commit in one transaction; a failed maintenance pass does
+  not expose a partially advanced watermark.
 
 Per-collector health state, missing-sample markers, and failure events are planned — no schema yet.
 
@@ -158,6 +196,7 @@ N/A — the initial version has no deprecated domain components.
 
 ## 8. Developer Tooling / Maintenance Scripts
 
-No domain maintenance scripts exist. Schema inspection currently uses the `status` command for a
-row count and time range. Startup applies built-in schema upgrades; compaction and repair commands
+No separate domain maintenance scripts exist. The writer performs rollup and retention maintenance
+internally. The `status` command shows raw/rollup ranges, storage sizes, watermarks, and the last
+maintenance result. Startup applies built-in schema upgrades; manual compaction and repair commands
 are TBD — not yet designed.

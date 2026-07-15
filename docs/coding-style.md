@@ -37,9 +37,10 @@ There is no CI configuration yet. The repository's pre-merge gate is the local c
 ### Typed configuration validation
 
 [`../src/config.rs`](../src/config.rs) deserializes into `AppConfig`, applies defaults with
-`#[serde(default)]`, and rejects zero interval or channel capacity before runtime work begins.
-New runtime settings SHOULD follow that typed model instead of reading environment values inside
-collectors.
+`#[serde(default)]`, and validates runtime, sampling, and retention settings before work begins.
+Durations and batch limits that must be positive are rejected at zero; retention tiers are checked
+from shortest to longest. New runtime settings SHOULD follow that typed model instead of reading
+environment values inside collectors.
 
 ### Typed library errors and contextual application errors
 
@@ -52,7 +53,9 @@ SHOULD be attached at the caller boundary.
 ### Blocking storage isolation
 
 [`../src/storage.rs`](../src/storage.rs) owns SQLite inside `tokio::task::spawn_blocking`. Async
-runtime code MUST NOT execute rusqlite statements directly on a Tokio worker thread.
+runtime code MUST NOT execute rusqlite statements directly on a Tokio worker thread. Inserts,
+rollups, retention cleanup, maintenance watermarks, and WAL checkpoints MUST preserve this single
+writer boundary.
 
 ## 4. Team Conventions (Not Enforced by the Linter)
 
@@ -92,6 +95,9 @@ Documentation MUST distinguish implemented behavior from `planned — no schema 
 - Collector implementations belong under `src/collector/` and implement `Collector`.
 - Runtime coordination belongs in `src/runtime.rs`; collectors SHOULD NOT own schedules.
 - Storage access belongs in `src/storage.rs` and MUST preserve the single-writer boundary.
+- Retention cleanup MUST NOT pass the watermark proving that the downstream rollup tier completed.
+- Maintenance work SHOULD use bounded bucket and row batches; automatic `VACUUM` MUST NOT run in
+  the collection path.
 - The channel between collection and storage MUST remain bounded.
 - CLI parsing and override precedence belong in `src/main.rs`; reusable behavior belongs in the
   library modules.
@@ -115,4 +121,3 @@ There is no changed-files-only command or CI gate yet.
 - [rustfmt configuration](../rustfmt.toml)
 - [Clippy configuration](../clippy.toml)
 - [Architecture overview](project-overview.md)
-
