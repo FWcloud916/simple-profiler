@@ -12,10 +12,16 @@ use crate::{
 };
 
 pub async fn run_profiler(config: AppConfig, sample_limit: Option<u64>) -> Result<()> {
+    let disk_capacity_interval =
+        Duration::from_secs(config.sampling.disk_capacity_interval_seconds);
+    let suppress_idle_io = config.sampling.suppress_idle_io;
     let collectors: Vec<Box<dyn Collector>> = vec![
         Box::new(SystemCollector::new()),
-        Box::new(DiskCollector::new()),
-        Box::new(NetworkCollector::new()),
+        Box::new(DiskCollector::with_options(
+            disk_capacity_interval,
+            suppress_idle_io,
+        )),
+        Box::new(NetworkCollector::with_suppress_idle_io(suppress_idle_io)),
     ];
     run_with_collectors(config, sample_limit, collectors).await
 }
@@ -27,7 +33,7 @@ async fn run_with_collectors(
 ) -> Result<()> {
     config.validate()?;
     let (sender, receiver) = mpsc::channel(config.channel_capacity);
-    let writer = spawn_writer(&config.database_path, receiver);
+    let writer = spawn_writer(&config.database_path, config.retention.clone(), receiver);
     let mut interval = tokio::time::interval(Duration::from_secs(config.interval_seconds));
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut collected_cycles = 0_u64;
@@ -142,6 +148,7 @@ mod tests {
             database_path: database_path.clone(),
             interval_seconds: 1,
             channel_capacity: 4,
+            ..AppConfig::default()
         };
         let collectors: Vec<Box<dyn Collector>> = vec![
             Box::new(UnavailableCollector),
@@ -153,7 +160,7 @@ mod tests {
             .expect("profiler run");
 
         let storage = Storage::open(&database_path).expect("storage");
-        assert_eq!(storage.status().expect("status").sample_count, 1);
+        assert_eq!(storage.status().expect("status").raw.row_count, 1);
     }
 
     #[tokio::test]
@@ -164,6 +171,7 @@ mod tests {
             database_path: database_path.clone(),
             interval_seconds: 1,
             channel_capacity: 4,
+            ..AppConfig::default()
         };
         let collectors: Vec<Box<dyn Collector>> = vec![Box::new(UnavailableCollector)];
 
@@ -172,6 +180,6 @@ mod tests {
             .expect("profiler run");
 
         let storage = Storage::open(&database_path).expect("storage");
-        assert_eq!(storage.status().expect("status").sample_count, 0);
+        assert_eq!(storage.status().expect("status").raw.row_count, 0);
     }
 }

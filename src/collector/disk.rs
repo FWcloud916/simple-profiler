@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+use std::time::Duration;
+
 use sysinfo::Disks;
 
 use super::{CollectionContext, Collector, CollectorError};
@@ -6,12 +8,22 @@ use crate::model::{Metric, MetricBatch};
 
 pub struct DiskCollector {
     disks: Disks,
+    capacity_interval: Duration,
+    suppress_idle_io: bool,
+    last_capacity_sample: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl DiskCollector {
     pub fn new() -> Self {
+        Self::with_options(Duration::from_secs(60), true)
+    }
+
+    pub fn with_options(capacity_interval: Duration, suppress_idle_io: bool) -> Self {
         Self {
             disks: Disks::new_with_refreshed_list(),
+            capacity_interval,
+            suppress_idle_io,
+            last_capacity_sample: None,
         }
     }
 }
@@ -39,42 +51,59 @@ impl Collector for DiskCollector {
             ));
         }
 
-        let metrics_per_disk = if context.elapsed.is_some() { 8 } else { 4 };
+        let emit_capacity = self.last_capacity_sample.is_none_or(|last| {
+            context
+                .collected_at
+                .signed_duration_since(last)
+                .to_std()
+                .is_ok_and(|elapsed| elapsed >= self.capacity_interval)
+        });
+        if emit_capacity {
+            self.last_capacity_sample = Some(context.collected_at);
+        }
+
+        let metrics_per_disk =
+            usize::from(emit_capacity) * 4 + usize::from(context.elapsed.is_some()) * 4;
         let mut metrics = Vec::with_capacity(self.disks.len() * metrics_per_disk);
         for disk in self.disks.list() {
             let resource = disk.mount_point().to_string_lossy().into_owned();
-            let total = disk.total_space();
-            let available = disk.available_space();
-            let used = total.saturating_sub(available);
-            let usage_percent = percentage(used, total);
+            if emit_capacity {
+                let total = disk.total_space();
+                let available = disk.available_space();
+                let used = total.saturating_sub(available);
+                let usage_percent = percentage(used, total);
 
-            metrics.extend([
-                resource_metric(
-                    context,
-                    &resource,
-                    "disk.space.total",
-                    total as f64,
-                    "bytes",
-                ),
-                resource_metric(
-                    context,
-                    &resource,
-                    "disk.space.available",
-                    available as f64,
-                    "bytes",
-                ),
-                resource_metric(context, &resource, "disk.space.used", used as f64, "bytes"),
-                resource_metric(
-                    context,
-                    &resource,
-                    "disk.space.usage",
-                    usage_percent,
-                    "percent",
-                ),
-            ]);
+                metrics.extend([
+                    resource_metric(
+                        context,
+                        &resource,
+                        "disk.space.total",
+                        total as f64,
+                        "bytes",
+                    ),
+                    resource_metric(
+                        context,
+                        &resource,
+                        "disk.space.available",
+                        available as f64,
+                        "bytes",
+                    ),
+                    resource_metric(context, &resource, "disk.space.used", used as f64, "bytes"),
+                    resource_metric(
+                        context,
+                        &resource,
+                        "disk.space.usage",
+                        usage_percent,
+                        "percent",
+                    ),
+                ]);
+            }
 
             if let Some(elapsed) = context.elapsed.filter(|elapsed| !elapsed.is_zero()) {
                 let usage = disk.usage();
+                if !should_emit_io(usage.read_bytes, usage.written_bytes, self.suppress_idle_io) {
+                    continue;
+                }
                 metrics.extend([
                     resource_metric(
                         context,
@@ -133,6 +162,10 @@ fn per_second(value: u64, elapsed: std::time::Duration) -> f64 {
     value as f64 / elapsed.as_secs_f64()
 }
 
+fn should_emit_io(read_bytes: u64, written_bytes: u64, suppress_idle_io: bool) -> bool {
+    !suppress_idle_io || read_bytes != 0 || written_bytes != 0
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -148,6 +181,13 @@ mod tests {
     #[test]
     fn calculates_bytes_per_second_from_elapsed_time() {
         assert_eq!(per_second(1_000, Duration::from_millis(500)), 2_000.0);
+    }
+
+    #[test]
+    fn suppresses_only_idle_io_when_enabled() {
+        assert!(!should_emit_io(0, 0, true));
+        assert!(should_emit_io(1, 0, true));
+        assert!(should_emit_io(0, 0, false));
     }
 
     #[tokio::test]
@@ -177,12 +217,42 @@ mod tests {
         assert!(
             second
                 .iter()
-                .any(|metric| metric.name == "disk.io.read.rate")
+                .all(|metric| !metric.name.starts_with("disk.space."))
         );
         assert!(
             second
                 .iter()
                 .all(|metric| metric.collected_at == collected_at)
+        );
+    }
+
+    #[tokio::test]
+    async fn emits_capacity_again_after_the_configured_interval() {
+        let mut collector = DiskCollector::with_options(Duration::from_secs(60), true);
+        if collector.disks.is_empty() {
+            return;
+        }
+        let collected_at = chrono::Utc::now();
+        let first = collector
+            .collect(&CollectionContext {
+                collected_at,
+                elapsed: None,
+            })
+            .await
+            .expect("first sample");
+        let second = collector
+            .collect(&CollectionContext {
+                collected_at: collected_at + chrono::Duration::seconds(60),
+                elapsed: Some(Duration::from_secs(60)),
+            })
+            .await
+            .expect("second sample");
+
+        assert!(first.iter().any(|metric| metric.name == "disk.space.total"));
+        assert!(
+            second
+                .iter()
+                .any(|metric| metric.name == "disk.space.total")
         );
     }
 }

@@ -81,13 +81,43 @@ async fn main() -> Result<()> {
             let storage = Storage::open(&config.database_path)?;
             let status = storage.status()?;
             println!("database: {}", config.database_path.display());
-            println!("samples: {}", status.sample_count);
+            println!("schema: v{}", status.schema_version);
+            print_dataset("raw", &status.raw);
+            print_dataset("1 minute", &status.minute);
+            print_dataset("15 minute", &status.quarter_hour);
             println!(
-                "range: {} -> {}",
-                status.oldest_sample.as_deref().unwrap_or("no data"),
-                status.newest_sample.as_deref().unwrap_or("no data")
+                "storage: database={} bytes, wal={} bytes, reusable={} bytes",
+                status.database_bytes, status.wal_bytes, status.free_page_bytes
+            );
+            println!(
+                "watermarks: 1 minute={}, 15 minute={}",
+                format_time(status.minute_watermark_ms),
+                format_time(status.quarter_hour_watermark_ms)
+            );
+            println!(
+                "maintenance: {} ({})",
+                format_time(status.last_maintenance_ms),
+                status
+                    .last_maintenance_result
+                    .as_deref()
+                    .unwrap_or("not run")
             );
             Ok(())
         }
     }
+}
+
+fn print_dataset(label: &str, dataset: &simple_profiler::storage::DatasetStatus) {
+    println!(
+        "{label}: {} rows, {} -> {}",
+        dataset.row_count,
+        format_time(dataset.oldest_ms),
+        format_time(dataset.newest_ms)
+    );
+}
+
+fn format_time(timestamp_ms: Option<i64>) -> String {
+    timestamp_ms
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map_or_else(|| "no data".to_owned(), |time| time.to_rfc3339())
 }

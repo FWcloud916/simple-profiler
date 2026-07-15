@@ -2,3 +2,15 @@ database_path = "data/simple-profiler.sqlite3"
 interval_seconds = 5
 channel_capacity = 128
 
+[sampling]
+disk_capacity_interval_seconds = 60
+suppress_idle_io = true
+
+[retention]
+raw_hours = 24
+minute_days = 30
+quarter_hour_days = 365
+maintenance_interval_seconds = 60
+late_arrival_grace_seconds = 30
+delete_batch_rows = 10000
+rollup_batch_buckets = 60

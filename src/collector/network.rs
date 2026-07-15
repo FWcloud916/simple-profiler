@@ -6,12 +6,18 @@ use crate::model::{Metric, MetricBatch};
 
 pub struct NetworkCollector {
     networks: Networks,
+    suppress_idle_io: bool,
 }
 
 impl NetworkCollector {
     pub fn new() -> Self {
+        Self::with_suppress_idle_io(true)
+    }
+
+    pub fn with_suppress_idle_io(suppress_idle_io: bool) -> Self {
         Self {
             networks: Networks::new_with_refreshed_list(),
+            suppress_idle_io,
         }
     }
 }
@@ -44,61 +50,80 @@ impl Collector for NetworkCollector {
         };
         let mut metrics = Vec::with_capacity(self.networks.len() * 8);
         for (interface, data) in self.networks.list() {
+            let received = data.received();
+            let transmitted = data.transmitted();
+            let packets_received = data.packets_received();
+            let packets_transmitted = data.packets_transmitted();
+            let receive_errors = data.errors_on_received();
+            let transmit_errors = data.errors_on_transmitted();
+            if !should_emit_io(
+                [
+                    received,
+                    transmitted,
+                    packets_received,
+                    packets_transmitted,
+                    receive_errors,
+                    transmit_errors,
+                ],
+                self.suppress_idle_io,
+            ) {
+                continue;
+            }
             metrics.extend([
                 resource_metric(
                     context,
                     interface,
                     "network.receive.delta",
-                    data.received() as f64,
+                    received as f64,
                     "bytes",
                 ),
                 resource_metric(
                     context,
                     interface,
                     "network.transmit.delta",
-                    data.transmitted() as f64,
+                    transmitted as f64,
                     "bytes",
                 ),
                 resource_metric(
                     context,
                     interface,
                     "network.receive.rate",
-                    per_second(data.received(), elapsed),
+                    per_second(received, elapsed),
                     "bytes_per_second",
                 ),
                 resource_metric(
                     context,
                     interface,
                     "network.transmit.rate",
-                    per_second(data.transmitted(), elapsed),
+                    per_second(transmitted, elapsed),
                     "bytes_per_second",
                 ),
                 resource_metric(
                     context,
                     interface,
                     "network.receive.packets.delta",
-                    data.packets_received() as f64,
+                    packets_received as f64,
                     "packets",
                 ),
                 resource_metric(
                     context,
                     interface,
                     "network.transmit.packets.delta",
-                    data.packets_transmitted() as f64,
+                    packets_transmitted as f64,
                     "packets",
                 ),
                 resource_metric(
                     context,
                     interface,
                     "network.receive.errors.delta",
-                    data.errors_on_received() as f64,
+                    receive_errors as f64,
                     "errors",
                 ),
                 resource_metric(
                     context,
                     interface,
                     "network.transmit.errors.delta",
-                    data.errors_on_transmitted() as f64,
+                    transmit_errors as f64,
                     "errors",
                 ),
             ]);
@@ -121,6 +146,10 @@ fn per_second(value: u64, elapsed: std::time::Duration) -> f64 {
     value as f64 / elapsed.as_secs_f64()
 }
 
+fn should_emit_io(counters: [u64; 6], suppress_idle_io: bool) -> bool {
+    !suppress_idle_io || counters.into_iter().any(|value| value != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -132,9 +161,16 @@ mod tests {
         assert_eq!(per_second(3_000, Duration::from_secs(2)), 1_500.0);
     }
 
+    #[test]
+    fn suppresses_only_fully_idle_interfaces_when_enabled() {
+        assert!(!should_emit_io([0; 6], true));
+        assert!(should_emit_io([0, 0, 1, 0, 0, 0], true));
+        assert!(should_emit_io([0; 6], false));
+    }
+
     #[tokio::test]
     async fn warms_up_before_emitting_network_rates() {
-        let mut collector = NetworkCollector::new();
+        let mut collector = NetworkCollector::with_suppress_idle_io(false);
         if collector.networks.is_empty() {
             return;
         }
