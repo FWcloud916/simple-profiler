@@ -1,0 +1,52 @@
+# Simple Profiler — Agent Guide
+
+Simple Profiler owns local collection and diagnostic storage of host resource metrics.
+
+## Hard constraints
+
+- MUST run `cargo test` successfully before declaring work done (source: README verification gate).
+- MUST run `cargo fmt --check` and Clippy before declaring Rust changes done (source: `rustfmt.toml` and `clippy.toml`).
+- MUST keep SQLite writes behind the single writer task (source: `docs/project-overview.md` §3).
+- MUST keep collector-to-storage channels bounded (source: `docs/project-overview.md` §3).
+- MUST update `PROGRESS.md` at clock-out (source: selected agent-harness workflow).
+
+## Read before you work
+
+Read the matching doc before non-trivial work. Small fixes and running checks can skip this.
+
+| Task | Read first |
+|---|---|
+| Architecture, runtime flow, directory layout, integrations | [docs/project-overview.md](docs/project-overview.md) |
+| Metrics, storage entities, anomaly or report behavior | [docs/domain-models.md](docs/domain-models.md) |
+| Style, lint rules, errors, and layering conventions | [docs/coding-style.md](docs/coding-style.md) |
+| Building or restyling the dashboard UI | [DESIGN.md](DESIGN.md) |
+
+## Commands
+
+```bash
+cargo build
+cargo run -- run
+cargo test
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
+## Session routine
+
+- **Clock-in:** read [PROGRESS.md](PROGRESS.md), then inspect `git log -3` and `git status`,
+  run `cargo test`, and pick up the single active item (WIP = 1).
+- **Clock-out:** run the verification commands, update `PROGRESS.md` with state, commit,
+  and test status, remove stale artifacts, then commit. A session is complete only after
+  verification passes and the repository is clean.
+
+## Conventions
+
+- Collector implementations live under `src/collector/` and return `MetricBatch` values.
+- Blocking SQLite work stays in the storage writer's blocking task.
+- Implemented and planned behavior MUST be labeled separately in documentation.
+
+## Docs maintenance
+
+When modifying a file under `docs/`, update its `> **Last updated:** YYYY-MM-DD` field to
+today's date. Requirement keywords (MUST, SHOULD, MAY) follow RFC 2119.
+
