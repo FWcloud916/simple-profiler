@@ -1,12 +1,13 @@
 # Simple Profiler — Progress
 
-> **Last session:** 2026-07-16 · commit `fdd20ce` · tests: passing (70)
+> **Last session:** 2026-07-16 · commit `7ae69dc` · tests: passing (70)
 
 ## Now (WIP = 1)
 
-No feature is active. GPU monitoring is fully retired; the per-user LaunchAgent runs schema v7 and
-continues CPU, memory, disk, network, process, anomaly, report, and dashboard behavior. The former
-root GPU LaunchDaemon, executable, plist, snapshot, configuration, and historical data are absent.
+No feature is active. GitHub validates pull requests and `main`, packages short-lived previews from
+`release-preview`, and publishes version-checked ARM64/Intel macOS releases from annotated tags.
+Version `v0.1.0` is published with portable SHA-256 checksums. The per-user LaunchAgent continues
+running schema v7 with CPU, memory, disk, network, process, anomaly, report, and dashboard behavior.
 
 ## Feature list
 
@@ -19,8 +20,9 @@ root GPU LaunchDaemon, executable, plist, snapshot, configuration, and historica
 | 5 | Record bounded multi-resource process snapshots, rollups, and event attribution | `cargo test` | passing |
 | 6 | Generate a local HTML diagnostic report for a selected time range | `cargo test` | passing |
 | 7 | Explore metrics and events in a local dashboard | `cargo test` | passing |
-| 8 | Retire unreliable GPU monitoring and remove its privileged helper/data | `cargo test` | retired |
+| 8 | Retire unreliable GPU monitoring and remove its privileged helper/data | `cargo test` | passing |
 | 9 | Install and supervise the profiler as an operating-system background service | `cargo test` | passing |
+| 10 | Validate changes and publish versioned native macOS archives through GitHub Actions | `gh release view v0.1.0` | passing |
 
 ## Done
 
@@ -171,6 +173,14 @@ root GPU LaunchDaemon, executable, plist, snapshot, configuration, and historica
   columns; its integrity check is `ok`. The root GPU LaunchDaemon and all three system artifacts
   were unloaded and deleted. A verified pre-removal backup is retained under
   `~/Documents/private/simple-profiler-backups/20260716-011043/`.
+- GitHub Actions now runs rustfmt, strict Clippy, 70 tests, a release build, and JavaScript syntax
+  checks for pull requests and `main`. Official actions are pinned to immutable commits.
+- The `release-preview` branch successfully built native ARM64 and Intel archives. Downloaded
+  preview checksums passed, and the ARM64 binary executed locally; preview artifacts expire after
+  seven days and do not create a permanent release.
+- Annotated tag `v0.1.0` passed version, CHANGELOG, and main-history validation, then published
+  native ARM64 and Intel archives plus `SHA256SUMS` at the GitHub Release. Both downloaded release
+  checksums passed, archive contents were complete, and the ARM64 binary reported version 0.1.0.
 
 ## Blockers
 
@@ -180,9 +190,14 @@ None.
 
 1. Observe real disk/network attribution and tune per-dimension top-N limits if necessary.
 2. Confirm the bounded process rollup backfill reaches the current completed minute/quarter-hour.
+3. Record user-visible work under CHANGELOG `Unreleased` and bump Cargo/CHANGELOG together for the
+   next annotated release tag.
 
 ## Decision log
 
+- 2026-07-16 — Use `main` as the mandatory quality gate, `release-preview` for seven-day native
+  packaging artifacts, and annotated `vMAJOR.MINOR.PATCH` tags for permanent GitHub Releases. A
+  formal tag MUST match Cargo and CHANGELOG versions and point to a commit contained in `main`.
 - 2026-07-16 — Retire GPU monitoring completely. Schema v7 purges its historical data and columns;
   runtime, CLI, report, dashboard, documentation, dependencies, root helper, and LaunchDaemon no
   longer expose or install GPU behavior. Preserve a verified pre-migration backup for rollback.
