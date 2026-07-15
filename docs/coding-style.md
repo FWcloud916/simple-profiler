@@ -22,7 +22,8 @@
 | Clippy | Rust lint diagnostics | Minimum supported Rust version 1.92.0 in `clippy.toml` |
 | rustc | Compilation and type checking | Edition 2024 in `Cargo.toml` |
 
-There is no CI configuration yet. The repository's pre-merge gate is the local command set in §6.
+GitHub Actions runs the repository's pre-merge gate for pull requests and `main`; the same checks
+also gate preview and tagged release packaging.
 
 ## 2. Linter Rules Summary
 
@@ -160,7 +161,9 @@ cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-There is no changed-files-only command or CI gate yet.
+The CI workflow uses `--locked`, additionally builds the release profile, and checks the embedded
+dashboard JavaScript with macOS JavaScriptCore. The Release workflow repeats the quality gate
+before building native Apple-silicon and Intel archives. There is no changed-files-only gate.
 
 ## 7. References
 

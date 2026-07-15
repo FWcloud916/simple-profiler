@@ -35,7 +35,6 @@ calls. GPU monitoring was retired in schema v7 and is not part of the runtime.
   in schema v7 after the platform source could not provide reliable process attribution.
 - **Not yet enabled:** Linux systemd, Windows Service, system-wide macOS LaunchDaemon, signed
   installer, and automatic updates.
-- No deprecated features exist in the initial version.
 
 ## 2. Tech Stack
 
@@ -146,7 +145,9 @@ single-writer path. HTML, CSS, and JavaScript assets are compiled into the Rust 
 .
 ├── config/
 │   └── default.toml       # Tracked example settings
+├── .github/workflows/     # Pull-request, preview, and tagged-release automation
 ├── docs/                  # Architecture, domain, and coding references
+├── scripts/               # Release-note extraction helpers
 ├── src/
 │   ├── collector/
 │   │   ├── disk.rs        # Disk capacity and I/O collector
@@ -175,6 +176,7 @@ single-writer path. HTML, CSS, and JavaScript assets are compiled into the Rust 
 ├── CLAUDE.md              # Symlink to AGENTS.md
 ├── DESIGN.md              # Dashboard design contract
 ├── PROGRESS.md            # Cross-session implementation state
+├── CHANGELOG.md           # Versioned user-visible changes and release notes
 ├── Cargo.toml             # Package manifest
 ├── clippy.toml            # Clippy MSRV configuration
 └── rustfmt.toml           # Rustfmt edition and line width
@@ -322,8 +324,17 @@ architectural goals but their service managers are not implemented.
 
 ### Deployment Pipeline
 
-There is no CI, signed/notarized package, automatic updater, Linux systemd unit, or Windows Service
-definition yet. A local optimized binary can install itself as
+GitHub Actions validates pull requests and `main` with rustfmt, strict Clippy, tests, a release
+build, and dashboard JavaScript syntax. A dedicated Release workflow accepts a
+`vMAJOR.MINOR.PATCH` tag only when it matches `Cargo.toml`, has a dated CHANGELOG section, and
+points to a commit contained in `main`. It builds native Apple-silicon and Intel macOS archives,
+publishes SHA-256 checksums and the matching changelog section, and uses only the repository's
+scoped `GITHUB_TOKEN`. The `release-preview` branch and manual runs produce seven-day workflow
+artifacts without creating a permanent release. Official GitHub Actions are pinned to immutable
+commit SHAs.
+
+Packages are not signed or notarized, and there is no automatic updater, Linux systemd unit, or
+Windows Service definition yet. A local optimized binary can install itself as
 `~/Library/LaunchAgents/com.simple-profiler.agent.plist`. Installation copies the executable and
 creates these per-user locations:
 

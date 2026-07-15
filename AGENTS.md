@@ -15,6 +15,8 @@ Simple Profiler owns local collection and diagnostic storage of host resource me
   approval (source: `docs/project-overview.md` §10).
 - MUST keep the dashboard loopback-only, token-scoped, read-only, and query-bounded (source:
   `docs/project-overview.md` §3).
+- MUST keep release tags, the Cargo package version, and the matching CHANGELOG heading identical
+  (source: `.github/workflows/release.yml`).
 
 ## Read before you work
 
@@ -42,6 +44,7 @@ target/release/simple-profiler service status
 cargo test
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
+scripts/extract-changelog.sh 0.1.0 CHANGELOG.md
 ```
 
 ## Session routine
@@ -69,6 +72,8 @@ cargo clippy --all-targets --all-features -- -D warnings
   `src/dashboard.rs`; embedded HTML/CSS/JavaScript live under `src/dashboard/` and follow
   `DESIGN.md`.
 - Implemented and planned behavior MUST be labeled separately in documentation.
+- User-visible changes belong under `Unreleased` in `CHANGELOG.md`; formal releases move them to a
+  dated version matching `Cargo.toml` and the `vMAJOR.MINOR.PATCH` tag.
 
 ## Docs maintenance
 

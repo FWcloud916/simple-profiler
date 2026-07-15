@@ -46,6 +46,10 @@ metrics, process fields, capabilities, reports, and dashboard surfaces during mi
 
 - Rust 1.92.0 or a compatible newer toolchain
 
+Prebuilt macOS archives for Apple silicon and Intel are attached to each tagged
+[GitHub release](https://github.com/FWcloud916/simple-profiler/releases). Each release also
+includes `SHA256SUMS`; verify the selected archive before installing its binary.
+
 ### Setup
 
 ```bash
@@ -182,13 +186,28 @@ cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
+## Releases
+
+Pull requests and pushes to `main` run the complete Rust quality gate and release build. Formal
+releases are tag-driven: update `Cargo.toml` and `CHANGELOG.md`, commit the release state to
+`main`, then push an annotated `vMAJOR.MINOR.PATCH` tag. Automation verifies that all three
+versions agree and that the tagged commit belongs to `main`, builds native Apple-silicon and Intel
+archives, generates SHA-256 checksums, and publishes the matching GitHub release.
+
+Pushing the dedicated `release-preview` branch or manually starting the Release workflow performs
+the same validation and packaging without creating a permanent GitHub release. Preview artifacts
+expire after seven days. See [CHANGELOG.md](CHANGELOG.md) for release notes.
+
 ## Project structure
 
 ```text
+.github/       Pull-request, main-branch, preview, and tagged-release automation
 config/        Example runtime configuration
 docs/          Architecture and development references
+scripts/       Release-note and maintenance helpers
 src/           CLI, collectors, dashboard assets/server, runtime coordination, models, and storage
 Cargo.toml     Rust package and dependency manifest
+CHANGELOG.md   Versioned user-visible changes and release notes
 PROGRESS.md    Cross-session implementation state
 DESIGN.md      Dashboard design contract
 ```
@@ -201,3 +220,4 @@ DESIGN.md      Dashboard design contract
 | [docs/domain-models.md](docs/domain-models.md) | Metric, anomaly-event, evidence, and storage mechanisms |
 | [docs/coding-style.md](docs/coding-style.md) | Rust formatting, linting, and project conventions |
 | [DESIGN.md](DESIGN.md) | Dashboard design tokens, responsive behavior, and visual rules |
+| [CHANGELOG.md](CHANGELOG.md) | Released and upcoming user-visible changes |
