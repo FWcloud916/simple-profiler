@@ -116,8 +116,6 @@
     const status = state.status;
     const cpu = findSeries("cpu.total.usage");
     const memory = findSeries("memory.usage");
-    const gpu = findSeries("gpu.device.usage");
-    const gpuCapability = findCapability("gpu.device.usage");
     const disks = findAllSeries("disk.space.usage");
     const maxDisk = disks.length ? Math.max(...disks.map((series) => series.max_value)) : null;
     const openEvents = snapshot.events.filter((event) => event.status === "open");
@@ -134,12 +132,6 @@
         value: memory ? formatValue(lastValue(memory), memory.unit) : "No data",
         detail: memory ? `Peak ${formatValue(memory.max_value, memory.unit)}` : "No retained samples",
         state: valueState(memory?.max_value, 90, 95),
-      },
-      {
-        label: "GPU usage",
-        value: gpu ? formatValue(lastValue(gpu), gpu.unit) : gpuCapability ? capabilityLabel(gpuCapability.state) : "No data",
-        detail: gpu ? `Peak ${formatValue(gpu.max_value, gpu.unit)}` : gpuCapability?.detail || "No retained samples",
-        state: gpu && gpuCapability?.state !== "degraded" ? "healthy" : "warning",
       },
       {
         label: "Highest disk usage",
@@ -653,7 +645,7 @@
 
   function renderProcesses() {
     const processes = [...state.snapshot.processes];
-    const sortFields = { cpu: "peak_cpu_percent", memory: "peak_memory_bytes", diskRead: "peak_disk_read_bytes_per_second", diskWrite: "peak_disk_write_bytes_per_second", networkReceive: "peak_network_receive_bytes_per_second", networkTransmit: "peak_network_transmit_bytes_per_second", gpu: "peak_gpu_usage_percent" };
+    const sortFields = { cpu: "peak_cpu_percent", memory: "peak_memory_bytes", diskRead: "peak_disk_read_bytes_per_second", diskWrite: "peak_disk_write_bytes_per_second", networkReceive: "peak_network_receive_bytes_per_second", networkTransmit: "peak_network_transmit_bytes_per_second" };
     const field = sortFields[state.processSort] || sortFields.cpu;
     processes.sort((left, right) => (right[field] ?? -1) - (left[field] ?? -1) || right.peak_cpu_percent - left.peak_cpu_percent);
     elements.processRows.replaceChildren(...processes.map((process) => {
@@ -665,7 +657,6 @@
         elementWithText("td", "", formatBytes(process.peak_memory_bytes)),
         elementWithText("td", "", `${formatRate(process.peak_disk_read_bytes_per_second)} / ${formatRate(process.peak_disk_write_bytes_per_second)}`),
         elementWithText("td", "", `${formatOptionalRate(process.peak_network_receive_bytes_per_second)} / ${formatOptionalRate(process.peak_network_transmit_bytes_per_second)}`),
-        elementWithText("td", "", process.peak_gpu_usage_percent == null ? "n/a" : `${formatNumber(process.peak_gpu_usage_percent)}%`),
         elementWithText("td", "", formatInteger(process.sample_count)),
         elementWithText("td", "", formatRelative(process.last_seen_ms)),
       );
@@ -750,7 +741,6 @@
     if (metricName === "disk.io.write.rate" || metricName === "disk.space.usage") return { rank: "disk_write_rank", average: "average_disk_write_bytes_per_second", peak: "peak_disk_write_bytes_per_second", unit: "bytes_per_second" };
     if (metricName === "network.receive.rate") return { rank: "network_receive_rank", average: "average_network_receive_bytes_per_second", peak: "peak_network_receive_bytes_per_second", unit: "bytes_per_second" };
     if (metricName === "network.transmit.rate") return { rank: "network_transmit_rank", average: "average_network_transmit_bytes_per_second", peak: "peak_network_transmit_bytes_per_second", unit: "bytes_per_second" };
-    if (metricName.startsWith("gpu.") && metricName.endsWith(".usage")) return { rank: "gpu_rank", average: "average_gpu_usage_percent", peak: "peak_gpu_usage_percent", unit: "percent" };
     return null;
   }
   function processOverlayCompatible(metricName) { return metricName !== "disk.space.usage"; }
@@ -806,8 +796,8 @@
     const closest = candidates.reduce((best, point) => !best || Math.abs(point.timestamp_ms - timestamp) < Math.abs(best.timestamp_ms - timestamp) ? point : best, null);
     return closest && Math.abs(closest.timestamp_ms - timestamp) <= maximumDistance ? closest : null;
   }
-  function metricOrder(name) { const index = ["cpu.total.usage", "memory.usage", "gpu.device.usage", "gpu.renderer.usage", "gpu.tiler.usage", "gpu.memory.used", "gpu.memory.allocated", "disk.space.usage", "disk.io.read.rate", "disk.io.write.rate", "network.receive.rate", "network.transmit.rate"].indexOf(name); return index < 0 ? 999 : index; }
-  function metricLabel(name) { return ({ "cpu.total.usage": "CPU usage", "memory.usage": "Memory usage", "gpu.device.usage": "GPU usage", "gpu.renderer.usage": "GPU renderer usage", "gpu.tiler.usage": "GPU tiler usage", "gpu.memory.used": "GPU memory in use", "gpu.memory.allocated": "GPU allocated memory", "disk.space.usage": "Disk space usage", "disk.io.read.rate": "Disk read rate", "disk.io.write.rate": "Disk write rate", "network.receive.rate": "Network receive rate", "network.transmit.rate": "Network transmit rate" })[name] || name; }
+  function metricOrder(name) { const index = ["cpu.total.usage", "memory.usage", "disk.space.usage", "disk.io.read.rate", "disk.io.write.rate", "network.receive.rate", "network.transmit.rate"].indexOf(name); return index < 0 ? 999 : index; }
+  function metricLabel(name) { return ({ "cpu.total.usage": "CPU usage", "memory.usage": "Memory usage", "disk.space.usage": "Disk space usage", "disk.io.read.rate": "Disk read rate", "disk.io.write.rate": "Disk write rate", "network.receive.rate": "Network receive rate", "network.transmit.rate": "Network transmit rate" })[name] || name; }
   function resolutionLabel(value) { return ({ raw: "Raw samples", minute: "1-minute rollup", quarter_hour: "15-minute rollup" })[value] || value; }
   function coverageText(oldest, newest) { return oldest == null || newest == null ? "no data" : `${formatTime(oldest)} → ${formatTime(newest)}`; }
   function freshnessLabel(timestamp) {

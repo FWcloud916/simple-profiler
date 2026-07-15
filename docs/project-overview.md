@@ -16,7 +16,7 @@
 
 Simple Profiler continuously samples host resource metrics, persists them locally, and turns
 selected time ranges into self-contained diagnostic reports. The implemented MVP collects CPU,
-memory, Apple GPU, disk, network, and bounded top-process measurements, writes raw data to SQLite, and
+memory, disk, network, and bounded top-process measurements, writes raw data to SQLite, and
 maintains one-minute and 15-minute metric retention tiers. It evaluates sustained CPU, memory, and
 per-mount disk-space rules, persists metric and related-process evidence across restarts, and
 exposes event, process, and report commands. On macOS
@@ -25,17 +25,14 @@ on-demand local dashboard is implemented.
 
 ### 1.2 Relationship with Other Systems
 
-The current program is standalone. It reads general host information through `sysinfo`, reads
-Apple GPU data from structured `/usr/sbin/ioreg`, process network counters from local `nettop`,
-and optional root-owned GPU snapshots produced by a separately installed helper. It writes a local
-SQLite file and makes no external network calls. NVIDIA and AMD adapters remain planned.
+The current program is standalone. It reads general host information through `sysinfo` and process
+network counters from local `nettop`. It writes a local SQLite file and makes no external network
+calls. GPU monitoring was retired in schema v7 and is not part of the runtime.
 
 ### 1.3 Deprecated / Retired or Not-Yet-Enabled Features
 
-- **Opt-in:** Per-process Apple GPU attribution requires the bundled helper to be installed as a
-  root LaunchDaemon; the normal user service never installs or enables it.
-- **Not yet enabled:** GPU temperature/power and NVIDIA/AMD GPU adapters. Apple GPU usage and
-  memory fields are enabled on macOS.
+- **Retired:** System and per-process GPU monitoring, including the privileged helper, were removed
+  in schema v7 after the platform source could not provide reliable process attribution.
 - **Not yet enabled:** Linux systemd, Windows Service, system-wide macOS LaunchDaemon, signed
   installer, and automatic updates.
 - No deprecated features exist in the initial version.
@@ -48,8 +45,7 @@ SQLite file and makes no external network calls. NVIDIA and AMD adapters remain 
 | Async runtime | Tokio 1.52.3 | Timed collection, bounded channels, shutdown signals, and the blocking storage task |
 | Local HTTP | Axum 0.8.9 | Loopback-only dashboard routing, JSON responses, middleware, and graceful shutdown |
 | Host metrics | sysinfo 0.38.4 | Cross-platform CPU, memory, disk, and network access; this is the newest locked release compatible with Rust 1.92.0 |
-| Apple GPU metrics | `/usr/sbin/ioreg` property list plus plist 1.10.0 | Non-privileged Apple AGX usage/memory fields with structured parsing and field-level capability state |
-| Process attribution | sysinfo disk deltas, macOS `nettop`, optional `powermetrics` helper | Bounded CPU/memory/disk/network rankings; privileged GPU work is isolated from the user collector through a validated snapshot file |
+| Process attribution | sysinfo disk deltas and macOS `nettop` | Bounded CPU/memory/disk/network rankings |
 | Local datastore | SQLite through rusqlite 0.39.0 | A local embedded store fits a single-host profiler; rusqlite supports an explicit single-writer design |
 | CLI | Clap 4.6.1 | Defines the implemented `run`, `status`, `events`, `processes`, `report`, `dashboard`, and `service` commands |
 | Dashboard UI | Embedded HTML/CSS/JavaScript/SVG | Keeps the local dashboard in one executable without Node, CDN, remote fonts, or runtime asset downloads |
@@ -73,8 +69,7 @@ Tokio interval ──► shared CollectionContext
                          ├──► SystemCollector
                          ├──► DiskCollector
                          ├──► NetworkCollector
-                         ├──► GpuCollector (15-second cadence on macOS)
-                         └──► ProcessCollector (CPU/memory/disk/net + optional GPU)
+                         └──► ProcessCollector (CPU/memory/disk/network)
                                    │
                                    ▼
                     combined successful CollectionBatch
@@ -90,8 +85,6 @@ Tokio interval ──► shared CollectionContext
                          ├── process snapshots and event attribution
                          └── metric + process 1m / 15m rollups
 
-Optional root LaunchDaemon ──► GPU helper ──► root-owned bounded snapshot file
-
 Browser ── tokenized loopback HTTP ──► Dashboard API ── read-only SQLite connections
 ```
 
@@ -104,7 +97,7 @@ the writer. Runtime logs can use a size-limited file writer with numbered retain
 The CLI assembles configuration and chooses an operation. `run` starts all collectors and the
 storage writer; `status` opens the same SQLite database and summarizes retention plus open anomaly
 counts; `events list/show` query recent event summaries and preserved metric/process evidence;
-`processes top` queries the latest CPU, memory, disk, network, or GPU ranking; `report generate` reads a bounded time
+`processes top` queries the latest CPU, memory, disk, or network ranking; `report generate` reads a bounded time
 range and writes an atomic, self-contained HTML artifact; `dashboard` serves the same bounded
 summary queries on an ephemeral loopback port until Ctrl-C or SIGTERM. Each cycle supplies
 one UTC timestamp and elapsed monotonic duration to every collector. The writer restores anomaly
@@ -114,9 +107,7 @@ engine advances only after
 that commit succeeds. One unavailable collector does not discard the others. Disk and network rate
 metrics and process CPU usage warm up before rate-based output. By default, fully idle I/O series
 are omitted and missing intervals
-therefore mean zero activity; disk capacity is emitted every 60 seconds. The Apple GPU adapter
-runs every 15 seconds by default, times out its child command after two seconds, and exponentially
-backs off repeated failures up to five minutes.
+therefore mean zero activity; disk capacity is emitted every 60 seconds.
 
 Report generation is a read-only path separate from the writer. It validates the requested range,
 prefers raw data through two hours, one-minute rollups through 24 hours, and 15-minute rollups for
@@ -159,13 +150,11 @@ single-writer path. HTML, CSS, and JavaScript assets are compiled into the Rust 
 ├── src/
 │   ├── collector/
 │   │   ├── disk.rs        # Disk capacity and I/O collector
-│   │   ├── gpu.rs         # Capability-aware Apple GPU collector and plist parser
 │   │   ├── mod.rs         # Collector contract, context, and shared error type
 │   │   ├── network.rs     # Interface transfer and error collector
-│   │   ├── process.rs     # Bounded CPU/memory/disk/network/optional-GPU process collector
+│   │   ├── process.rs     # Bounded CPU/memory/disk/network process collector
 │   │   └── system.rs      # CPU and memory collector
 │   ├── anomaly.rs         # Sustained-threshold state machine
-│   ├── bin/simple-profiler-gpu-helper.rs # One-shot privileged GPU snapshot producer
 │   ├── anomaly_storage.rs # Event/state/evidence persistence and queries
 │   ├── capability_storage.rs # Collector capability upserts and queries
 │   ├── config.rs          # TOML model, defaults, and validation
@@ -227,11 +216,11 @@ Simple Profiler has a CLI plus a token-scoped, loopback-only HTTP interface whil
 
 | Command | Purpose | Important options |
 |---|---|---|
-| `simple-profiler run` | Collect CPU, memory, Apple GPU, disk, and network metrics until interrupted or a sample limit is reached | `--database`, `--interval-seconds`, `--samples` |
+| `simple-profiler run` | Collect CPU, memory, disk, and network metrics until interrupted or a sample limit is reached | `--database`, `--interval-seconds`, `--samples` |
 | `simple-profiler status` | Print schema, per-tier row counts/ranges, file sizes, watermarks, maintenance result, anomaly counts, and collector capabilities | `--database` |
 | `simple-profiler events list` | List recent events newest-first, optionally only those still open | `--open`, `--limit` (1–1,000), `--database` |
 | `simple-profiler events show <ID>` | Show thresholds, time range, peak/last values, sample/gap counts, and ordered metric/process evidence | `--database` |
-| `simple-profiler processes top` | Show the latest bounded process ranking by CPU, memory, disk, network, or GPU | `--sort cpu\|memory\|disk-read\|disk-write\|network-receive\|network-transmit\|gpu`, `--limit` (1–100), `--database` |
+| `simple-profiler processes top` | Show the latest bounded process ranking by CPU, memory, disk, or network | `--sort cpu\|memory\|disk-read\|disk-write\|network-receive\|network-transmit`, `--limit` (1–100), `--database` |
 | `simple-profiler report generate` | Generate a self-contained local HTML report for a relative or explicit range | `--last`, `--from` + `--to`, `--output`, `--open`, `--database` |
 | `simple-profiler dashboard` | Serve the read-only dashboard until interrupted | `--port` (0 chooses an available port), `--open`, `--database` |
 | `simple-profiler service install` | Copy the current executable, preserve/create service configuration, write the plist, load it, and start collection | none |
@@ -254,16 +243,14 @@ and writes under `~/Documents/SimpleProfiler Reports/` unless `--output` is prov
 | System metric collection | Each cycle | Refresh total/per-core CPU and memory metrics |
 | Disk metric collection | Each cycle | Emit capacity every 60 seconds by default; emit non-idle I/O delta/rate after warm-up |
 | Network metric collection | Each cycle | Emit non-idle per-interface transfer, packet, error, and rate metrics after warm-up |
-| Process collection | Every 15 seconds by default | After warm-up, retain a capped union of top CPU, memory, disk read/write, network receive/transmit, and available GPU processes |
-| Optional process GPU helper | Root LaunchDaemon every 15 seconds when explicitly installed | Read `powermetrics`, normalize cumulative process GPU time, and atomically replace a root-owned snapshot consumed read-only by the user collector |
-| Apple GPU collection | Every 15 seconds by default | Parse AGX property-list fields for device/renderer/tiler usage and in-use/allocated memory; persist per-field capability state |
+| Process collection | Every 15 seconds by default | After warm-up, retain a capped union of top CPU, memory, disk read/write, and network receive/transmit processes |
 | SQLite writer/anomaly evaluation | Each received batch | Evaluate matching raw metrics and atomically commit metric/process samples, collector capabilities, event transitions, evidence, and restart state |
 | Storage maintenance | Checked by the writer after inserts; every 60 seconds by default | Roll up at most 60 complete buckets per tier, apply metric and closed-event retention in bounded chunks, then request a passive WAL checkpoint |
 | macOS LaunchAgent supervision | Login load and abnormal exit | Start the installed `run` command and restart after unsuccessful exit, throttled to at most one launch per 10 seconds |
 | Log rotation | Before a write would exceed the configured size | Rename numbered files and retain five rotated 10 MiB files plus the current file by default |
 | Dashboard refresh | Browser request; every 15 seconds by default | Open one bounded read-only connection per API request and return JSON without changing collection state |
 | Dashboard time navigation | Slider, Earlier/Later/Live control, chart pointer drag, or chart keyboard input | Convert the retained-coverage position into a bounded explicit `from`/`to` snapshot query; historical navigation disables auto-refresh until Live is selected |
-| Dashboard chart inspection | Pointer hover or chart focus | Show system average/min/max and at most three matching process series for CPU, memory, disk I/O, network, and GPU; disk capacity uses a separate writer-activity lane because units differ |
+| Dashboard chart inspection | Pointer hover or chart focus | Show system average/min/max and at most three matching process series for CPU, memory, disk I/O, and network; disk capacity uses a separate writer-activity lane because units differ |
 | Graceful shutdown | Ctrl-C, SIGTERM, or `--samples` limit | Close the channel, drain queued batches, then stop |
 
 Maintenance waits 30 seconds before considering a bucket complete. Raw deletion cannot pass the
@@ -279,10 +266,8 @@ abstraction for CPU, memory, disk, and network data, and bundled SQLite is compi
 application. On macOS, service commands invoke the local `/bin/launchctl` process and read its
 status output. The optional dashboard accepts HTTP only from its exact `127.0.0.1` origin and does
 not load or call remote services. Anomaly detection reads only local metric batches and
-configuration; it makes no notification or external network call. The macOS GPU adapter invokes
-local `/usr/sbin/ioreg`; process network attribution invokes `/usr/bin/nettop`. An optional
-separately installed root helper invokes `powermetrics` and publishes only PID/GPU-usage JSON from
-the process table through a validated root-owned file. NVIDIA and AMD adapter choices are TBD.
+configuration; it makes no notification or external network call. Process network attribution
+invokes local `/usr/bin/nettop`.
 
 ## 9. Database / Data Stores
 
@@ -292,7 +277,8 @@ adds an integer millisecond timestamp to raw samples, backfills v1 rows, and cre
 maintenance-state tables. Schema version 3 adds anomaly event, restart-state, and evidence tables.
 Schema version 4 adds process snapshots and per-event process evidence without removing older
 metric or anomaly rows. Schema version 5 adds current collector capability state. Schema version 6
-adds nullable network/GPU and non-null disk process fields plus process metric rollups.
+adds network/disk process fields plus process metric rollups. Schema version 7 removes GPU
+columns, metrics, rollups, capabilities, and GPU-linked anomaly history transactionally.
 
 | Table | Purpose | Indexes |
 |---|---|---|
@@ -302,7 +288,7 @@ adds nullable network/GPU and non-null disk process fields plus process metric r
 | `anomaly_events` | Open/closed warning or critical periods, thresholds, peak/last values, counts, and timestamps | `(status, started_at_ms)`; `(severity, started_at_ms)` |
 | `anomaly_states` | Restart-safe normal/pending/open/recovering state per rule and resource | Primary key on `(rule_id, resource)` |
 | `anomaly_event_evidence` | Bounded prelude, trigger, escalation, peak, periodic, and recovery samples | `(event_id, collected_at_ms)` |
-| `process_samples` | Bounded snapshots keyed by timestamp and PID/start-time identity, with CPU/memory/disk/network/GPU values and ranks | `collected_at_ms`; `(pid, process_start_time_seconds, collected_at_ms)` |
+| `process_samples` | Bounded snapshots keyed by timestamp and PID/start-time identity, with CPU/memory/disk/network values and ranks | `collected_at_ms`; `(pid, process_start_time_seconds, collected_at_ms)` |
 | `process_metric_rollups` | Per-process, per-dimension one-minute and 15-minute aggregates | Composite primary key plus resolution/time and metric/time indexes |
 | `anomaly_event_process_evidence` | Copied top-process snapshots for matching attributable event checkpoints | `(event_id, collected_at_ms)` plus a uniqueness key per process snapshot |
 | `collector_capabilities` | Current available/degraded/unavailable state, provider, detail, and check time per collector/resource/capability | Primary key on `(collector, resource, capability)` |
@@ -312,7 +298,7 @@ transaction together with collector capabilities, anomaly state, and evidence. R
 sample count, minimum,
 maximum, sum, weighted average, and last value. Process snapshots use PID plus process start time
 as identity and store name, optional parent PID, CPU percentage, resident bytes, disk/network
-rates, optional GPU time/usage, and per-dimension ranks. Command line, environment, and working
+rates, and per-dimension ranks. Command line, environment, and working
 directory are not collected; executable path is opt-in and disabled by default.
 One-minute rollups are derived from raw samples; 15-minute rollups combine one-minute statistics
 without averaging averages. Upserts make completed buckets safe to recompute. Defaults retain raw
@@ -379,7 +365,5 @@ and 1,000-event cleanup chunks. Its rule list supplies metric names, warning/cri
 thresholds, duration/sample requirements, and maximum data gaps. `[process]` defaults to a
 15-second cadence, top 10 per dimension with a 40-process snapshot cap, 24-hour/7-day/90-day
 retention, non-privileged `nettop`, top five rows per event checkpoint, and a 500-row per-event cap;
-executable paths and the root-owned GPU snapshot are opt-in. `[gpu]` enables the
-15-second Apple adapter by default, selects `auto` provider discovery, and bounds each child
-command to two seconds. The generated LaunchAgent config
+executable paths are opt-in. The generated LaunchAgent config
 uses an absolute database path and log path under the per-user directories above.

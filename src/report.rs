@@ -111,7 +111,6 @@ pub struct ReportProcessSummary {
     pub peak_disk_write_bytes_per_second: f64,
     pub peak_network_receive_bytes_per_second: Option<f64>,
     pub peak_network_transmit_bytes_per_second: Option<f64>,
-    pub peak_gpu_usage_percent: Option<f64>,
     pub sample_count: i64,
     pub first_seen_ms: i64,
     pub last_seen_ms: i64,
@@ -132,8 +131,6 @@ pub struct DashboardProcessPoint {
     pub peak_network_receive_bytes_per_second: Option<f64>,
     pub average_network_transmit_bytes_per_second: Option<f64>,
     pub peak_network_transmit_bytes_per_second: Option<f64>,
-    pub average_gpu_usage_percent: Option<f64>,
-    pub peak_gpu_usage_percent: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -147,7 +144,6 @@ pub struct DashboardProcessSeries {
     pub disk_write_rank: Option<u8>,
     pub network_receive_rank: Option<u8>,
     pub network_transmit_rank: Option<u8>,
-    pub gpu_rank: Option<u8>,
     pub points: Vec<DashboardProcessPoint>,
 }
 
@@ -515,11 +511,11 @@ fn render_processes(data: &ReportData, html: &mut String) {
     if data.processes.is_empty() {
         html.push_str("<p class=\"empty\">No retained process snapshots overlap this range.</p>");
     } else {
-        html.push_str("<table><thead><tr><th>Process</th><th>PID</th><th>Peak CPU</th><th>Peak memory</th><th>Peak disk read/write</th><th>Peak network in/out</th><th>Peak GPU</th><th>Observed</th></tr></thead><tbody>");
+        html.push_str("<table><thead><tr><th>Process</th><th>PID</th><th>Peak CPU</th><th>Peak memory</th><th>Peak disk read/write</th><th>Peak network in/out</th><th>Observed</th></tr></thead><tbody>");
         for process in &data.processes {
             let _ = write!(
                 html,
-                "<tr><td>{}</td><td>{}</td><td>{:.2}%</td><td>{}</td><td>{} / {}</td><td>{} / {}</td><td>{}</td><td>{}</td></tr>",
+                "<tr><td>{}</td><td>{}</td><td>{:.2}%</td><td>{}</td><td>{} / {}</td><td>{} / {}</td><td>{}</td></tr>",
                 escape_html(&process.name),
                 process.pid,
                 process.peak_cpu_percent,
@@ -532,9 +528,6 @@ fn render_processes(data: &ReportData, html: &mut String) {
                 process
                     .peak_network_transmit_bytes_per_second
                     .map_or_else(|| "n/a".to_owned(), format_rate),
-                process
-                    .peak_gpu_usage_percent
-                    .map_or_else(|| "n/a".to_owned(), |value| format!("{value:.2}%")),
                 process.sample_count,
             );
         }
@@ -552,15 +545,6 @@ fn metric_label(name: &str) -> String {
         "disk.io.write.rate" => "Disk write rate".to_owned(),
         "network.receive.rate" => "Network receive rate".to_owned(),
         "network.transmit.rate" => "Network transmit rate".to_owned(),
-        "gpu.device.usage" => "GPU usage".to_owned(),
-        "gpu.renderer.usage" => "GPU renderer usage".to_owned(),
-        "gpu.tiler.usage" => "GPU tiler usage".to_owned(),
-        "gpu.memory.used" => "GPU memory in use".to_owned(),
-        "gpu.memory.allocated" => "GPU allocated memory".to_owned(),
-        "gpu.memory.total" => "GPU memory total".to_owned(),
-        "gpu.device.identity" => "GPU identity".to_owned(),
-        "gpu.power" => "GPU power".to_owned(),
-        "gpu.temperature" => "GPU temperature".to_owned(),
         _ => name.to_owned(),
     }
 }

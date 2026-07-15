@@ -25,7 +25,7 @@ use crate::{
 pub use crate::anomaly_storage::{EventDetail, EventEvidence, EventSummary};
 pub use crate::process_storage::{ProcessEventEvidence, ProcessSort, StoredProcessSample};
 
-const CURRENT_SCHEMA_VERSION: i64 = 6;
+const CURRENT_SCHEMA_VERSION: i64 = 7;
 const MINUTE_MS: i64 = 60_000;
 const QUARTER_HOUR_MS: i64 = 900_000;
 const MINUTE_WATERMARK: &str = "rollup_60_watermark_ms";
@@ -140,15 +140,12 @@ CREATE TABLE IF NOT EXISTS process_samples (
     network_transmit_bytes     INTEGER,
     network_receive_bytes_per_second REAL,
     network_transmit_bytes_per_second REAL,
-    gpu_time_ns                INTEGER,
-    gpu_usage_percent          REAL,
     cpu_rank                   INTEGER,
     memory_rank                INTEGER,
     disk_read_rank             INTEGER,
     disk_write_rank            INTEGER,
     network_receive_rank       INTEGER,
-    network_transmit_rank      INTEGER,
-    gpu_rank                   INTEGER
+    network_transmit_rank      INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS process_metric_rollups (
@@ -189,15 +186,12 @@ CREATE TABLE IF NOT EXISTS anomaly_event_process_evidence (
     network_transmit_bytes     INTEGER,
     network_receive_bytes_per_second REAL,
     network_transmit_bytes_per_second REAL,
-    gpu_time_ns                INTEGER,
-    gpu_usage_percent          REAL,
     cpu_rank                   INTEGER,
     memory_rank                INTEGER,
     disk_read_rank             INTEGER,
     disk_write_rank            INTEGER,
     network_receive_rank       INTEGER,
     network_transmit_rank      INTEGER,
-    gpu_rank                   INTEGER,
     UNIQUE(event_id, collected_at_ms, pid, process_start_time_seconds)
 );
 
@@ -593,8 +587,8 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         transaction.execute_batch(TABLE_SCHEMA)?;
     }
     for (table, columns) in [
-        ("process_samples", PROCESS_V6_COLUMNS),
-        ("anomaly_event_process_evidence", PROCESS_V6_COLUMNS),
+        ("process_samples", PROCESS_COLUMNS),
+        ("anomaly_event_process_evidence", PROCESS_COLUMNS),
     ] {
         for (name, declaration) in columns {
             if !table_has_column(&transaction, table, name)? {
@@ -605,6 +599,9 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             }
         }
     }
+    if version < 7 {
+        migrate_remove_gpu(&transaction)?;
+    }
     transaction.execute_batch(TABLE_SCHEMA)?;
     transaction.execute_batch(INDEX_SCHEMA)?;
     transaction.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
@@ -612,7 +609,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-const PROCESS_V6_COLUMNS: &[(&str, &str)] = &[
+const PROCESS_COLUMNS: &[(&str, &str)] = &[
     ("disk_read_bytes", "INTEGER NOT NULL DEFAULT 0"),
     ("disk_write_bytes", "INTEGER NOT NULL DEFAULT 0"),
     ("disk_read_bytes_per_second", "REAL NOT NULL DEFAULT 0"),
@@ -621,14 +618,83 @@ const PROCESS_V6_COLUMNS: &[(&str, &str)] = &[
     ("network_transmit_bytes", "INTEGER"),
     ("network_receive_bytes_per_second", "REAL"),
     ("network_transmit_bytes_per_second", "REAL"),
-    ("gpu_time_ns", "INTEGER"),
-    ("gpu_usage_percent", "REAL"),
     ("disk_read_rank", "INTEGER"),
     ("disk_write_rank", "INTEGER"),
     ("network_receive_rank", "INTEGER"),
     ("network_transmit_rank", "INTEGER"),
-    ("gpu_rank", "INTEGER"),
 ];
+
+fn migrate_remove_gpu(transaction: &Transaction<'_>) -> Result<()> {
+    transaction.execute_batch(
+        "DELETE FROM anomaly_event_process_evidence
+           WHERE event_id IN (SELECT id FROM anomaly_events
+                              WHERE collector = 'gpu' OR metric_name LIKE 'gpu.%');
+         DELETE FROM anomaly_event_evidence
+           WHERE event_id IN (SELECT id FROM anomaly_events
+                              WHERE collector = 'gpu' OR metric_name LIKE 'gpu.%');
+         DELETE FROM anomaly_states
+           WHERE rule_id IN (SELECT DISTINCT rule_id FROM anomaly_events
+                             WHERE collector = 'gpu' OR metric_name LIKE 'gpu.%');
+         DELETE FROM anomaly_events WHERE collector = 'gpu' OR metric_name LIKE 'gpu.%';
+         DELETE FROM metric_samples WHERE collector = 'gpu' OR metric_name LIKE 'gpu.%';
+         DELETE FROM metric_rollups WHERE collector = 'gpu' OR metric_name LIKE 'gpu.%';
+         DELETE FROM process_metric_rollups WHERE metric_name LIKE 'process.gpu.%';
+         DELETE FROM collector_capabilities
+           WHERE collector = 'gpu' OR capability LIKE 'gpu.%' OR capability LIKE 'process.gpu%';",
+    )?;
+    rebuild_process_table_without_gpu(transaction, "process_samples")?;
+    rebuild_process_table_without_gpu(transaction, "anomaly_event_process_evidence")?;
+    Ok(())
+}
+
+fn rebuild_process_table_without_gpu(transaction: &Transaction<'_>, table: &str) -> Result<()> {
+    if !table_has_column(transaction, table, "gpu_time_ns")?
+        && !table_has_column(transaction, table, "gpu_usage_percent")?
+        && !table_has_column(transaction, table, "gpu_rank")?
+    {
+        return Ok(());
+    }
+    let legacy = format!("{table}_with_gpu");
+    transaction.execute(&format!("ALTER TABLE {table} RENAME TO {legacy}"), [])?;
+    transaction.execute_batch(TABLE_SCHEMA)?;
+    let (columns, selected_columns) = if table == "process_samples" {
+        (
+            "id, collected_at_ms, pid, process_start_time_seconds, parent_pid, name, executable_path,
+             cpu_usage_percent, memory_bytes, disk_read_bytes, disk_write_bytes,
+             disk_read_bytes_per_second, disk_write_bytes_per_second, network_receive_bytes,
+             network_transmit_bytes, network_receive_bytes_per_second,
+             network_transmit_bytes_per_second, cpu_rank, memory_rank, disk_read_rank,
+             disk_write_rank, network_receive_rank, network_transmit_rank",
+            "id, collected_at_ms, pid, process_start_time_seconds, parent_pid, name, executable_path,
+             cpu_usage_percent, memory_bytes, disk_read_bytes, disk_write_bytes,
+             disk_read_bytes_per_second, disk_write_bytes_per_second, network_receive_bytes,
+             network_transmit_bytes, network_receive_bytes_per_second,
+             network_transmit_bytes_per_second, cpu_rank, memory_rank, disk_read_rank,
+             disk_write_rank, network_receive_rank, network_transmit_rank",
+        )
+    } else {
+        (
+            "id, event_id, kind, collected_at_ms, pid, process_start_time_seconds, parent_pid, name,
+             executable_path, cpu_usage_percent, memory_bytes, disk_read_bytes, disk_write_bytes,
+             disk_read_bytes_per_second, disk_write_bytes_per_second, network_receive_bytes,
+             network_transmit_bytes, network_receive_bytes_per_second,
+             network_transmit_bytes_per_second, cpu_rank, memory_rank, disk_read_rank,
+             disk_write_rank, network_receive_rank, network_transmit_rank",
+            "id, event_id, kind, collected_at_ms, pid, process_start_time_seconds, parent_pid, name,
+             executable_path, cpu_usage_percent, memory_bytes, disk_read_bytes, disk_write_bytes,
+             disk_read_bytes_per_second, disk_write_bytes_per_second, network_receive_bytes,
+             network_transmit_bytes, network_receive_bytes_per_second,
+             network_transmit_bytes_per_second, cpu_rank, memory_rank, disk_read_rank,
+             disk_write_rank, network_receive_rank, network_transmit_rank",
+        )
+    };
+    transaction.execute(
+        &format!("INSERT INTO {table} ({columns}) SELECT {selected_columns} FROM {legacy}"),
+        [],
+    )?;
+    transaction.execute(&format!("DROP TABLE {legacy}"), [])?;
+    Ok(())
+}
 
 fn table_exists(connection: &Connection, table: &str) -> Result<bool> {
     Ok(connection
@@ -1147,15 +1213,12 @@ mod tests {
             network_transmit_bytes: None,
             network_receive_bytes_per_second: None,
             network_transmit_bytes_per_second: None,
-            gpu_time_ns: None,
-            gpu_usage_percent: None,
             cpu_rank,
             memory_rank,
             disk_read_rank: None,
             disk_write_rank: None,
             network_receive_rank: None,
             network_transmit_rank: None,
-            gpu_rank: None,
         }
     }
 
@@ -1407,6 +1470,66 @@ mod tests {
     }
 
     #[test]
+    fn upgrades_v6_by_removing_gpu_data_and_columns() {
+        let directory = tempdir().expect("temp dir");
+        let path = directory.path().join("v6.sqlite3");
+        let legacy = Connection::open(&path).expect("legacy");
+        legacy.execute_batch(TABLE_SCHEMA).expect("base schema");
+        legacy
+            .execute_batch(
+                "ALTER TABLE process_samples ADD COLUMN gpu_time_ns INTEGER;
+                 ALTER TABLE process_samples ADD COLUMN gpu_usage_percent REAL;
+                 ALTER TABLE process_samples ADD COLUMN gpu_rank INTEGER;
+                 ALTER TABLE anomaly_event_process_evidence ADD COLUMN gpu_time_ns INTEGER;
+                 ALTER TABLE anomaly_event_process_evidence ADD COLUMN gpu_usage_percent REAL;
+                 ALTER TABLE anomaly_event_process_evidence ADD COLUMN gpu_rank INTEGER;
+                 INSERT INTO process_samples
+                   (collected_at_ms, pid, process_start_time_seconds, name,
+                    cpu_usage_percent, memory_bytes, gpu_time_ns, gpu_usage_percent, gpu_rank)
+                   VALUES (1000, 42, 10, 'legacy', 12.5, 4096, 100, 5.0, 1);
+                 INSERT INTO metric_samples
+                   (collected_at, collected_at_ms, collector, metric_name, value, unit)
+                   VALUES ('1970-01-01T00:00:01Z', 1000, 'gpu', 'gpu.device.usage', 5.0, 'percent');
+                 INSERT INTO process_metric_rollups
+                   (bucket_start_ms, resolution_seconds, pid, process_start_time_seconds, name,
+                    metric_name, unit, sample_count, min_value, max_value, sum_value,
+                    average_value, last_value, peak_rank)
+                   VALUES (0, 60, 42, 10, 'legacy', 'process.gpu.usage', 'percent',
+                           1, 5.0, 5.0, 5.0, 5.0, 5.0, 1);
+                 INSERT INTO collector_capabilities
+                   (collector, resource, capability, state, provider, checked_at_ms)
+                   VALUES ('gpu', 'Apple GPU 0', 'gpu.device.usage', 'available', 'apple_ioreg', 1000);
+                 PRAGMA user_version=6;",
+            )
+            .expect("v6 schema and data");
+        drop(legacy);
+
+        let storage = Storage::open(&path).expect("migrate v6");
+        assert_eq!(
+            storage.status().expect("status").schema_version,
+            CURRENT_SCHEMA_VERSION
+        );
+        assert_eq!(storage.status().expect("status").processes.row_count, 1);
+        assert!(
+            !table_has_column(&storage.connection, "process_samples", "gpu_usage_percent")
+                .expect("column")
+        );
+        for table in [
+            "metric_samples",
+            "process_metric_rollups",
+            "collector_capabilities",
+        ] {
+            let count: i64 = storage
+                .connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("count");
+            assert_eq!(count, 0, "{table}");
+        }
+    }
+
+    #[test]
     fn capability_updates_commit_with_the_collection_batch() {
         let directory = tempdir().expect("temp dir");
         let path = directory.path().join("capabilities.sqlite3");
@@ -1415,11 +1538,11 @@ mod tests {
         let process = ProcessConfig::default();
         let mut engine = storage.load_anomaly_engine(&anomaly).expect("engine");
         let capability = CollectorCapability {
-            collector: "gpu".to_owned(),
-            resource: "Apple GPU 0".to_owned(),
-            capability: "gpu.device.usage".to_owned(),
+            collector: "process".to_owned(),
+            resource: String::new(),
+            capability: "process.network_io".to_owned(),
             state: CapabilityState::Available,
-            provider: "apple_ioreg".to_owned(),
+            provider: "macos-nettop".to_owned(),
             detail: None,
             checked_at_ms: 1_000,
         };

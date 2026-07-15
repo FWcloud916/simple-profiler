@@ -4,7 +4,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde::Deserialize;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use tokio::{process::Command, time::timeout};
 
@@ -27,27 +26,11 @@ struct NetworkTotals {
     transmitted: u64,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
-struct GpuTotal {
-    pid: u32,
-    #[serde(default)]
-    gpu_time_ns: Option<u64>,
-    #[serde(default)]
-    gpu_usage_percent: Option<f64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GpuSnapshotFile {
-    collected_at_ms: i64,
-    processes: Vec<GpuTotal>,
-}
-
 pub struct ProcessCollector {
     config: ProcessConfig,
     system: Option<System>,
     last_collection: Option<Instant>,
     previous_network: HashMap<(u32, u64), NetworkTotals>,
-    previous_gpu: HashMap<(u32, u64), u64>,
     warmed_up: bool,
 }
 
@@ -58,7 +41,6 @@ impl ProcessCollector {
             system: Some(System::new()),
             last_collection: None,
             previous_network: HashMap::new(),
-            previous_gpu: HashMap::new(),
             warmed_up: false,
         }
     }
@@ -118,8 +100,6 @@ impl ProcessCollector {
                         network_transmit_bytes: None,
                         network_receive_bytes_per_second: None,
                         network_transmit_bytes_per_second: None,
-                        gpu_time_ns: None,
-                        gpu_usage_percent: None,
                     }
                 })
                 .collect::<Vec<_>>();
@@ -177,50 +157,6 @@ impl ProcessCollector {
                 CapabilityState::Unavailable,
                 "disabled",
                 Some("process network collection is disabled".to_owned()),
-                collected_at.timestamp_millis(),
-            ));
-        }
-
-        if let Some(path) = self.config.gpu_snapshot_path.as_deref() {
-            match collect_gpu_totals(
-                path,
-                self.config.gpu_snapshot_max_age_seconds,
-                collected_at.timestamp_millis(),
-            )
-            .await
-            {
-                Ok(totals) => {
-                    apply_gpu_measurements(
-                        &mut candidates,
-                        &totals,
-                        &mut self.previous_gpu,
-                        elapsed,
-                    );
-                    collection.capabilities.push(capability(
-                        "process.gpu_time",
-                        CapabilityState::Available,
-                        "privileged-helper",
-                        None,
-                        collected_at.timestamp_millis(),
-                    ));
-                }
-                Err(error) => {
-                    collection.warnings.push(error.clone());
-                    collection.capabilities.push(capability(
-                        "process.gpu_time",
-                        CapabilityState::Degraded,
-                        "privileged-helper",
-                        Some(error),
-                        collected_at.timestamp_millis(),
-                    ));
-                }
-            }
-        } else {
-            collection.capabilities.push(capability(
-                "process.gpu_time",
-                CapabilityState::Unavailable,
-                "not-configured",
-                Some("optional privileged GPU helper is not configured".to_owned()),
                 collected_at.timestamp_millis(),
             ));
         }
@@ -375,93 +311,6 @@ fn apply_network_deltas(
     *previous = next;
 }
 
-async fn collect_gpu_totals(
-    path: &std::path::Path,
-    max_age_seconds: u64,
-    now_ms: i64,
-) -> Result<HashMap<u32, GpuTotal>, String> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        let metadata = std::fs::metadata(&path)
-            .map_err(|error| format!("could not read GPU snapshot metadata: {error}"))?;
-        if !metadata.is_file() || metadata.len() > 1024 * 1024 {
-            return Err("GPU snapshot must be a regular file no larger than 1 MiB".to_owned());
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
-                return Err(
-                    "GPU snapshot must be root-owned and not group/world writable".to_owned(),
-                );
-            }
-        }
-        let source = std::fs::read(&path)
-            .map_err(|error| format!("could not read GPU snapshot: {error}"))?;
-        let snapshot: GpuSnapshotFile = serde_json::from_slice(&source)
-            .map_err(|error| format!("GPU snapshot contained invalid JSON: {error}"))?;
-        let maximum_age_ms = i64::try_from(max_age_seconds)
-            .unwrap_or(i64::MAX / 1_000)
-            .saturating_mul(1_000);
-        if snapshot.collected_at_ms > now_ms.saturating_add(5_000)
-            || now_ms.saturating_sub(snapshot.collected_at_ms) > maximum_age_ms
-        {
-            return Err("GPU snapshot is stale or has a future timestamp".to_owned());
-        }
-        let mut totals = HashMap::new();
-        for row in snapshot.processes {
-            let valid_usage = row
-                .gpu_usage_percent
-                .filter(|value| value.is_finite() && *value >= 0.0);
-            if row.gpu_time_ns.is_none() && valid_usage.is_none() {
-                return Err("GPU snapshot row contained no valid measurement".to_owned());
-            }
-            totals.insert(
-                row.pid,
-                GpuTotal {
-                    gpu_time_ns: row.gpu_time_ns,
-                    gpu_usage_percent: valid_usage,
-                    ..row
-                },
-            );
-        }
-        Ok(totals)
-    })
-    .await
-    .map_err(|error| format!("GPU snapshot task failed: {error}"))?
-}
-
-fn apply_gpu_measurements(
-    candidates: &mut [ProcessCandidate],
-    totals: &HashMap<u32, GpuTotal>,
-    previous: &mut HashMap<(u32, u64), u64>,
-    elapsed: Duration,
-) {
-    let elapsed_ns = elapsed.as_nanos().max(1) as f64;
-    let mut next = HashMap::new();
-    for candidate in candidates {
-        let key = candidate_identity(candidate);
-        let Some(total) = totals.get(&candidate.pid).copied() else {
-            continue;
-        };
-        if let Some(usage) = total.gpu_usage_percent {
-            candidate.gpu_usage_percent = Some(usage.clamp(0.0, 100.0));
-        }
-        if let Some(gpu_time_ns) = total.gpu_time_ns {
-            next.insert(key, gpu_time_ns);
-            if let Some(old) = previous.get(&key) {
-                let delta = gpu_time_ns.saturating_sub(*old);
-                candidate.gpu_time_ns = Some(delta);
-                if candidate.gpu_usage_percent.is_none() {
-                    candidate.gpu_usage_percent =
-                        Some((delta as f64 / elapsed_ns * 100.0).clamp(0.0, 100.0));
-                }
-            }
-        }
-    }
-    *previous = next;
-}
-
 #[derive(Debug, Clone)]
 struct ProcessCandidate {
     pid: u32,
@@ -479,8 +328,6 @@ struct ProcessCandidate {
     network_transmit_bytes: Option<u64>,
     network_receive_bytes_per_second: Option<f64>,
     network_transmit_bytes_per_second: Option<f64>,
-    gpu_time_ns: Option<u64>,
-    gpu_usage_percent: Option<f64>,
 }
 
 fn rank_candidates(
@@ -543,16 +390,6 @@ fn rank_candidates(
         config,
         collected_at,
     );
-    rank_optional_by(
-        &candidates,
-        config.top_gpu,
-        |candidate| candidate.gpu_usage_percent,
-        |sample, rank| sample.gpu_rank = Some(rank),
-        &mut selected,
-        config,
-        collected_at,
-    );
-
     let mut samples: Vec<_> = selected.into_values().collect();
     samples.sort_by_key(|sample| {
         (
@@ -630,7 +467,6 @@ fn best_rank(sample: &ProcessSample) -> u32 {
         sample.disk_write_rank,
         sample.network_receive_rank,
         sample.network_transmit_rank,
-        sample.gpu_rank,
     ]
     .into_iter()
     .flatten()
@@ -672,15 +508,12 @@ fn sample_from_candidate(
         network_transmit_bytes: candidate.network_transmit_bytes,
         network_receive_bytes_per_second: candidate.network_receive_bytes_per_second,
         network_transmit_bytes_per_second: candidate.network_transmit_bytes_per_second,
-        gpu_time_ns: candidate.gpu_time_ns,
-        gpu_usage_percent: candidate.gpu_usage_percent,
         cpu_rank: None,
         memory_rank: None,
         disk_read_rank: None,
         disk_write_rank: None,
         network_receive_rank: None,
         network_transmit_rank: None,
-        gpu_rank: None,
     }
 }
 
@@ -706,8 +539,6 @@ mod tests {
             network_transmit_bytes: None,
             network_receive_bytes_per_second: None,
             network_transmit_bytes_per_second: None,
-            gpu_time_ns: None,
-            gpu_usage_percent: None,
         }
     }
 
@@ -801,28 +632,5 @@ mod tests {
         );
         assert_eq!(candidates[0].network_receive_bytes, Some(0));
         assert_eq!(candidates[0].network_transmit_bytes, Some(0));
-    }
-
-    #[test]
-    fn applies_direct_gpu_usage_without_a_warmup_snapshot() {
-        let mut candidates = vec![candidate(7, 10, 1.0, 1)];
-        let totals = HashMap::from([(
-            7,
-            GpuTotal {
-                pid: 7,
-                gpu_time_ns: None,
-                gpu_usage_percent: Some(12.5),
-            },
-        )]);
-        let mut previous = HashMap::new();
-        apply_gpu_measurements(
-            &mut candidates,
-            &totals,
-            &mut previous,
-            Duration::from_secs(15),
-        );
-        assert_eq!(candidates[0].gpu_usage_percent, Some(12.5));
-        assert_eq!(candidates[0].gpu_time_ns, None);
-        assert!(previous.is_empty());
     }
 }

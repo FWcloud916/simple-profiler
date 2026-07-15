@@ -37,7 +37,7 @@ There is no CI configuration yet. The repository's pre-merge gate is the local c
 ### Typed configuration validation
 
 [`../src/config.rs`](../src/config.rs) deserializes into `AppConfig`, applies defaults with
-`#[serde(default)]`, and validates runtime, sampling, logging, anomaly, process, GPU, and retention
+`#[serde(default)]`, and validates runtime, sampling, logging, anomaly, process, and retention
 settings before work begins. Durations, log limits, and batch limits that must be positive are
 rejected at zero; retention tiers are checked from shortest to longest. Anomaly rule validation
 also enforces unique non-empty IDs, finite ordered high-water thresholds, positive sample limits,

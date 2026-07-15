@@ -4,11 +4,8 @@ A local-first Rust service that continuously records system metrics for later di
 
 ## What it does
 
-- Collects CPU, memory, Apple GPU, disk capacity/I/O, and network transfer metrics at configurable
+- Collects CPU, memory, disk capacity/I/O, and network transfer metrics at configurable
   intervals.
-- On Apple silicon, records GPU device/renderer/tiler utilization plus in-use and allocated GPU
-  memory through non-privileged structured `ioreg` output. Capability status explicitly reports
-  unavailable power, temperature, or unified-memory-total fields instead of storing zeroes.
 - Suppresses idle disk/network I/O by default and samples disk capacity every 60 seconds to limit
   storage growth.
 - Combines successful collectors into one cycle batch and sends it through a bounded channel.
@@ -17,12 +14,12 @@ A local-first Rust service that continuously records system metrics for later di
   critical, recovery, duration, sample-count, and data-gap rules.
 - Persists anomaly state across restarts and preserves bounded prelude, trigger, escalation, peak,
   periodic, and recovery evidence independently from raw-sample retention.
-- Samples a bounded union of the top CPU, resident-memory, disk-read/write, network-receive/
-  transmit, and optional GPU processes every 15 seconds, without collecting command lines,
+- Samples a bounded union of the top CPU, resident-memory, disk-read/write, and network-receive/
+  transmit processes every 15 seconds, without collecting command lines,
   environments, or working directories.
 - Uses non-privileged macOS `nettop` process counters for network attribution and `sysinfo` deltas
   for process disk I/O. Provider failures degrade only the affected dimension.
-- Attaches matching bounded top-process evidence to CPU, memory, disk-I/O, network, and GPU anomaly
+- Attaches matching bounded top-process evidence to CPU, memory, disk-I/O, and network anomaly
   events; disk-space capacity events show host-wide writer context instead of false filesystem
   ownership.
 - Retains process raw samples for 24 hours, process one-minute rollups for 7 days, and process
@@ -40,9 +37,8 @@ A local-first Rust service that continuously records system metrics for later di
 - Installs and supervises itself as a per-user macOS LaunchAgent, with graceful shutdown,
   single-instance protection, service health output, and bounded log rotation.
 
-NVIDIA/AMD adapters remain planned. Per-process Apple GPU attribution is implemented as an
-optional, separately installed root helper that writes a bounded root-owned snapshot; it is never
-enabled or installed by the normal per-user service command.
+GPU monitoring is intentionally not part of the project. Schema v7 removes its historical
+metrics, process fields, capabilities, reports, and dashboard surfaces during migration.
 
 ## Quickstart
 
@@ -95,13 +91,6 @@ cargo run -- events show 1
 and per-mount disk-space rules. Rule state is stored in SQLite, so a normal process restart does
 not reset an in-progress detection or open event.
 
-### Inspect GPU capabilities
-
-GPU collection is enabled by default every 15 seconds on macOS. The same status commands show each
-field as `available`, `degraded`, or `unavailable` together with its provider and reason. Configure
-the adapter under `[gpu]` in [`config/default.toml`](config/default.toml); `provider = "auto"`
-selects the non-privileged Apple `ioreg` adapter on macOS.
-
 ### Inspect resource-heavy processes
 
 Show the latest ranking for any collected process dimension:
@@ -118,26 +107,6 @@ processes. Raw process snapshots default to 24-hour retention and rollups keep b
 90 days. Matching event evidence is copied into the event record and remains available after raw
 snapshots expire. Executable paths are disabled by default; command lines, environment variables,
 and working directories are never collected.
-
-### Optional per-process Apple GPU helper
-
-The normal profiler remains a user LaunchAgent. The separately built
-`simple-profiler-gpu-helper` is a one-shot root utility intended for a root LaunchDaemon: it reads
-the `powermetrics` process table, converts its `GPU ms/s` rate to usage percentage, and atomically replaces
-`/var/run/simple-profiler/process-gpu.json`. The user process accepts that file only when it is
-root-owned, not group/world writable, at most 1 MiB, and fresh. Build it with:
-
-```bash
-cargo build --release --bin simple-profiler-gpu-helper
-```
-
-[`config/com.simple-profiler.gpu-helper.plist.example`](config/com.simple-profiler.gpu-helper.plist.example)
-is the LaunchDaemon template. Installing the binary/plist and loading the LaunchDaemon changes
-system-wide privileged state and is intentionally not automated; do it only after explicit
-approval. After installation, set
-`gpu_snapshot_path = "/var/run/simple-profiler/process-gpu.json"` under `[process]`.
-An idle sample is a valid empty process list; it means the provider is healthy but no process used
-measurable GPU time during that sample.
 
 ### Generate a diagnostic report
 
@@ -170,8 +139,8 @@ It never listens beyond `127.0.0.1`, and each launch uses a new unguessable URL 
 selected window across retained history with a slider, Earlier/Later controls, or direct horizontal
 dragging on any chart. Focused charts also accept Left/Right/Home/End keys, and Live returns to the
 latest preset with auto-refresh enabled. Hovering a chart shows the selected timestamp plus the
-system average, minimum, maximum, and top matching processes. CPU, memory, disk-I/O, network, and
-GPU charts overlay the top three retained process series with ranked colors and line patterns.
+system average, minimum, maximum, and top matching processes. CPU, memory, disk-I/O, and network
+charts overlay the top three retained process series with ranked colors and line patterns.
 Memory tooltips show percentage and bytes; disk-space capacity uses a separate host-wide writer
 activity lane because percent-used and bytes-per-second are different units.
 

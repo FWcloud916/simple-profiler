@@ -17,7 +17,6 @@ top_cpu = 10
 top_memory = 10
 top_disk = 10
 top_network = 10
-top_gpu = 10
 max_snapshot_processes = 40
 raw_retention_hours = 24
 minute_retention_days = 7
@@ -28,13 +27,6 @@ include_executable_path = false
 network_enabled = true
 network_command = "/usr/bin/nettop"
 network_command_timeout_seconds = 5
-gpu_snapshot_max_age_seconds = 45
-
-[gpu]
-enabled = true
-interval_seconds = 15
-command_timeout_seconds = 2
-provider = "auto"
 
 [retention]
 raw_hours = 24

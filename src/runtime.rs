@@ -8,8 +8,8 @@ use tracing::{debug, info, warn};
 use crate::model::CollectionBatch;
 use crate::{
     collector::{
-        CollectionContext, Collector, DiskCollector, GpuCollector, NetworkCollector,
-        ProcessCollector, SystemCollector,
+        CollectionContext, Collector, DiskCollector, NetworkCollector, ProcessCollector,
+        SystemCollector,
     },
     config::AppConfig,
     instance::InstanceLock,
@@ -40,7 +40,6 @@ async fn run_with_collectors(
     let _instance_lock = InstanceLock::acquire(&config.database_path)?;
     let (sender, receiver) = mpsc::channel(config.channel_capacity);
     let mut process_collector = ProcessCollector::new(config.process.clone());
-    let mut gpu_collector = GpuCollector::new(config.gpu.clone());
     let writer = spawn_writer(
         &config.database_path,
         config.retention.clone(),
@@ -92,20 +91,13 @@ async fn run_with_collectors(
                 for warning in &process.warnings {
                     warn!(collector = "process", error = %warning, "collection degraded");
                 }
-                let gpu = gpu_collector.collect(&context).await.unwrap_or_default();
-                if let Some(warning) = &gpu.warning {
-                    warn!(collector = "gpu", error = %warning, "collection degraded");
-                }
-                cycle_batch.extend(gpu.metrics);
                 let metric_count = cycle_batch.len();
                 let process_count = process.samples.len();
-                let capability_count = gpu.capabilities.len() + process.capabilities.len();
-                let mut capabilities = gpu.capabilities;
-                capabilities.extend(process.capabilities);
+                let capability_count = process.capabilities.len();
                 let storage_batch = CollectionBatch {
                     metrics: cycle_batch,
                     processes: process.samples,
-                    capabilities,
+                    capabilities: process.capabilities,
                 };
                 if !storage_batch.is_empty() {
                     sender.send(storage_batch).await.context("storage writer stopped")?;
@@ -219,10 +211,6 @@ mod tests {
             database_path: database_path.clone(),
             interval_seconds: 1,
             channel_capacity: 4,
-            gpu: crate::config::GpuConfig {
-                enabled: false,
-                ..crate::config::GpuConfig::default()
-            },
             ..AppConfig::default()
         };
         let collectors: Vec<Box<dyn Collector>> = vec![
@@ -246,10 +234,6 @@ mod tests {
             database_path: database_path.clone(),
             interval_seconds: 1,
             channel_capacity: 4,
-            gpu: crate::config::GpuConfig {
-                enabled: false,
-                ..crate::config::GpuConfig::default()
-            },
             ..AppConfig::default()
         };
         let collectors: Vec<Box<dyn Collector>> = vec![Box::new(UnavailableCollector)];

@@ -114,7 +114,7 @@ enum EventsCommand {
 
 #[derive(Debug, Subcommand)]
 enum ProcessesCommand {
-    /// Show the latest top processes by CPU, memory, disk, network, or GPU.
+    /// Show the latest top processes by CPU, memory, disk, or network.
     Top {
         /// Resource used to rank the processes.
         #[arg(long, value_enum, default_value_t = ProcessSortArg::Cpu)]
@@ -161,7 +161,6 @@ enum ProcessSortArg {
     DiskWrite,
     NetworkReceive,
     NetworkTransmit,
-    Gpu,
 }
 
 #[derive(Debug, Subcommand)]
@@ -422,7 +421,6 @@ fn handle_processes(action: ProcessesCommand, config: &mut AppConfig) -> Result<
                 ProcessSortArg::DiskWrite => ProcessSort::DiskWrite,
                 ProcessSortArg::NetworkReceive => ProcessSort::NetworkReceive,
                 ProcessSortArg::NetworkTransmit => ProcessSort::NetworkTransmit,
-                ProcessSortArg::Gpu => ProcessSort::Gpu,
             };
             let storage = Storage::open(&config.database_path)?;
             let processes = storage.latest_processes(sort, limit)?;
@@ -442,7 +440,6 @@ fn handle_processes(action: ProcessesCommand, config: &mut AppConfig) -> Result<
                     ProcessSort::DiskWrite => process.disk_write_rank,
                     ProcessSort::NetworkReceive => process.network_receive_rank,
                     ProcessSort::NetworkTransmit => process.network_transmit_rank,
-                    ProcessSort::Gpu => process.gpu_rank,
                 };
                 print_process_sample(&process, None, rank);
             }
@@ -461,7 +458,7 @@ fn print_process_sample(
         |kind| format!("[{kind}] {} ", format_time(Some(process.collected_at_ms))),
     );
     println!(
-        "  {prefix}pid={} {} cpu={:.2}% memory={} disk-read={}/s disk-write={}/s network-in={} network-out={} gpu={}{}",
+        "  {prefix}pid={} {} cpu={:.2}% memory={} disk-read={}/s disk-write={}/s network-in={} network-out={}{}",
         process.pid,
         process.name,
         process.cpu_usage_percent,
@@ -476,9 +473,6 @@ fn print_process_sample(
             || "n/a".to_owned(),
             |value| format!("{}/s", format_bytes(value.max(0.0) as u64))
         ),
-        process
-            .gpu_usage_percent
-            .map_or_else(|| "n/a".to_owned(), |value| format!("{value:.2}%")),
         process
             .executable_path
             .as_deref()

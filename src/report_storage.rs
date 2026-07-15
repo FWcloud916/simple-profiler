@@ -24,12 +24,7 @@ const REPORT_METRICS: &str = r#"
     'disk.io.read.rate',
     'disk.io.write.rate',
     'network.receive.rate',
-    'network.transmit.rate',
-    'gpu.device.usage',
-    'gpu.renderer.usage',
-    'gpu.tiler.usage',
-    'gpu.memory.used',
-    'gpu.memory.allocated'
+    'network.transmit.rate'
 "#;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -51,7 +46,6 @@ struct ProcessSeriesSelection {
     disk_write_rank: Option<u8>,
     network_receive_rank: Option<u8>,
     network_transmit_rank: Option<u8>,
-    gpu_rank: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -62,7 +56,6 @@ enum ProcessDimension {
     DiskWrite,
     NetworkReceive,
     NetworkTransmit,
-    Gpu,
 }
 
 pub(crate) fn load_report(connection: &Connection, range: ReportRange) -> Result<ReportData> {
@@ -356,7 +349,6 @@ fn query_processes(
         "peak_disk_write",
         "peak_network_receive",
         "peak_network_transmit",
-        "peak_gpu",
     ] {
         let sql = format!(
             "SELECT pid, process_start_time_seconds, MAX(name),
@@ -366,7 +358,6 @@ fn query_processes(
                     MAX(disk_write_bytes_per_second) AS peak_disk_write,
                     MAX(network_receive_bytes_per_second) AS peak_network_receive,
                     MAX(network_transmit_bytes_per_second) AS peak_network_transmit,
-                    MAX(gpu_usage_percent) AS peak_gpu,
                     COUNT(*), MIN(collected_at_ms), MAX(collected_at_ms)
              FROM process_samples
              WHERE collected_at_ms >= ?1 AND collected_at_ms < ?2
@@ -395,10 +386,9 @@ fn query_processes(
                     peak_disk_write_bytes_per_second: row.get(6)?,
                     peak_network_receive_bytes_per_second: row.get(7)?,
                     peak_network_transmit_bytes_per_second: row.get(8)?,
-                    peak_gpu_usage_percent: row.get(9)?,
-                    sample_count: row.get(10)?,
-                    first_seen_ms: row.get(11)?,
-                    last_seen_ms: row.get(12)?,
+                    sample_count: row.get(9)?,
+                    first_seen_ms: row.get(10)?,
+                    last_seen_ms: row.get(11)?,
                 })
             },
         )?;
@@ -461,26 +451,17 @@ fn query_rollup_processes(
         "peak_disk_write",
         "peak_network_receive",
         "peak_network_transmit",
-        "peak_gpu",
     ] {
         let sql = format!(
             "SELECT pid, process_start_time_seconds, MAX(name),
-                      MAX(CASE WHEN metric_name='process.cpu.usage' THEN max_value END),
-                      MAX(CASE WHEN metric_name='process.memory.bytes' THEN max_value END),
-                      MAX(CASE WHEN metric_name='process.disk.read.rate' THEN max_value END),
-                      MAX(CASE WHEN metric_name='process.disk.write.rate' THEN max_value END),
-                      MAX(CASE WHEN metric_name='process.network.receive.rate' THEN max_value END),
-                      MAX(CASE WHEN metric_name='process.network.transmit.rate' THEN max_value END),
-                      MAX(CASE WHEN metric_name='process.gpu.usage' THEN max_value END),
-                      SUM(CASE WHEN metric_name='process.cpu.usage' THEN sample_count ELSE 0 END),
-                      MIN(bucket_start_ms), MAX(bucket_start_ms),
                       MAX(CASE WHEN metric_name='process.cpu.usage' THEN max_value END) AS peak_cpu,
                       MAX(CASE WHEN metric_name='process.memory.bytes' THEN max_value END) AS peak_memory,
                       MAX(CASE WHEN metric_name='process.disk.read.rate' THEN max_value END) AS peak_disk_read,
                       MAX(CASE WHEN metric_name='process.disk.write.rate' THEN max_value END) AS peak_disk_write,
                       MAX(CASE WHEN metric_name='process.network.receive.rate' THEN max_value END) AS peak_network_receive,
                       MAX(CASE WHEN metric_name='process.network.transmit.rate' THEN max_value END) AS peak_network_transmit,
-                      MAX(CASE WHEN metric_name='process.gpu.usage' THEN max_value END) AS peak_gpu
+                      SUM(CASE WHEN metric_name='process.cpu.usage' THEN sample_count ELSE 0 END),
+                      MIN(bucket_start_ms), MAX(bucket_start_ms)
                FROM process_metric_rollups
                WHERE resolution_seconds=?1 AND bucket_start_ms>=?2 AND bucket_start_ms<?3
                GROUP BY pid, process_start_time_seconds
@@ -524,10 +505,9 @@ fn read_rollup_process_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<Repo
         peak_disk_write_bytes_per_second: row.get::<_, Option<f64>>(6)?.unwrap_or(0.0),
         peak_network_receive_bytes_per_second: row.get(7)?,
         peak_network_transmit_bytes_per_second: row.get(8)?,
-        peak_gpu_usage_percent: row.get(9)?,
-        sample_count: row.get(10)?,
-        first_seen_ms: row.get(11)?,
-        last_seen_ms: row.get(12)?,
+        sample_count: row.get(9)?,
+        first_seen_ms: row.get(10)?,
+        last_seen_ms: row.get(11)?,
     })
 }
 
@@ -547,7 +527,6 @@ fn query_process_series(
         ("peak_disk_write", ProcessDimension::DiskWrite),
         ("peak_network_receive", ProcessDimension::NetworkReceive),
         ("peak_network_transmit", ProcessDimension::NetworkTransmit),
-        ("peak_gpu", ProcessDimension::Gpu),
     ] {
         let sql = format!(
             "SELECT pid, process_start_time_seconds, MAX(name),
@@ -556,8 +535,7 @@ fn query_process_series(
                     MAX(disk_read_bytes_per_second) AS peak_disk_read,
                     MAX(disk_write_bytes_per_second) AS peak_disk_write,
                     MAX(network_receive_bytes_per_second) AS peak_network_receive,
-                    MAX(network_transmit_bytes_per_second) AS peak_network_transmit,
-                    MAX(gpu_usage_percent) AS peak_gpu
+                    MAX(network_transmit_bytes_per_second) AS peak_network_transmit
              FROM process_samples
              WHERE collected_at_ms >= ?1 AND collected_at_ms < ?2
              GROUP BY pid, process_start_time_seconds
@@ -595,7 +573,6 @@ fn query_process_series(
                     disk_write_rank: None,
                     network_receive_rank: None,
                     network_transmit_rank: None,
-                    gpu_rank: None,
                 });
             let rank = Some(u8::try_from(index + 1).unwrap_or(u8::MAX));
             match dimension {
@@ -605,7 +582,6 @@ fn query_process_series(
                 ProcessDimension::DiskWrite => selection.disk_write_rank = rank,
                 ProcessDimension::NetworkReceive => selection.network_receive_rank = rank,
                 ProcessDimension::NetworkTransmit => selection.network_transmit_rank = rank,
-                ProcessDimension::Gpu => selection.gpu_rank = rank,
             }
         }
     }
@@ -619,8 +595,7 @@ fn query_process_series(
                     AVG(disk_read_bytes_per_second), MAX(disk_read_bytes_per_second),
                     AVG(disk_write_bytes_per_second), MAX(disk_write_bytes_per_second),
                     AVG(network_receive_bytes_per_second), MAX(network_receive_bytes_per_second),
-                    AVG(network_transmit_bytes_per_second), MAX(network_transmit_bytes_per_second),
-                    AVG(gpu_usage_percent), MAX(gpu_usage_percent)
+                    AVG(network_transmit_bytes_per_second), MAX(network_transmit_bytes_per_second)
              FROM process_samples
              WHERE collected_at_ms >= ?1 AND collected_at_ms < ?2
                AND pid = ?3 AND process_start_time_seconds = ?4
@@ -651,8 +626,6 @@ fn query_process_series(
                     peak_network_receive_bytes_per_second: row.get(10)?,
                     average_network_transmit_bytes_per_second: row.get(11)?,
                     peak_network_transmit_bytes_per_second: row.get(12)?,
-                    average_gpu_usage_percent: row.get(13)?,
-                    peak_gpu_usage_percent: row.get(14)?,
                 })
             },
         )?;
@@ -666,7 +639,6 @@ fn query_process_series(
             disk_write_rank: selection.disk_write_rank,
             network_receive_rank: selection.network_receive_rank,
             network_transmit_rank: selection.network_transmit_rank,
-            gpu_rank: selection.gpu_rank,
             points: rows.collect::<rusqlite::Result<Vec<_>>>()?,
         });
     }
@@ -711,7 +683,7 @@ fn query_rollup_process_series(
     bucket_span_ms: i64,
 ) -> Result<(i64, Option<u64>, Vec<DashboardProcessSeries>)> {
     let summaries = query_rollup_processes(connection, range, resolution)?;
-    let mut selected: BTreeMap<_, (ReportProcessSummary, [Option<u8>; 7])> = BTreeMap::new();
+    let mut selected: BTreeMap<_, (ReportProcessSummary, [Option<u8>; 6])> = BTreeMap::new();
     for dimension in [
         ProcessDimension::Cpu,
         ProcessDimension::Memory,
@@ -719,7 +691,6 @@ fn query_rollup_process_series(
         ProcessDimension::DiskWrite,
         ProcessDimension::NetworkReceive,
         ProcessDimension::NetworkTransmit,
-        ProcessDimension::Gpu,
     ] {
         let mut ranked: Vec<_> = summaries
             .iter()
@@ -737,7 +708,7 @@ fn query_rollup_process_series(
         {
             let entry = selected
                 .entry((process.pid, process.process_start_time_seconds))
-                .or_insert_with(|| (process.clone(), [None; 7]));
+                .or_insert_with(|| (process.clone(), [None; 6]));
             entry.1[process_dimension_index(dimension)] =
                 Some(u8::try_from(index + 1).unwrap_or(u8::MAX));
         }
@@ -757,9 +728,7 @@ fn query_rollup_process_series(
                     SUM(CASE WHEN metric_name='process.network.receive.rate' THEN sum_value END) / NULLIF(SUM(CASE WHEN metric_name='process.network.receive.rate' THEN sample_count END),0),
                     MAX(CASE WHEN metric_name='process.network.receive.rate' THEN max_value END),
                     SUM(CASE WHEN metric_name='process.network.transmit.rate' THEN sum_value END) / NULLIF(SUM(CASE WHEN metric_name='process.network.transmit.rate' THEN sample_count END),0),
-                    MAX(CASE WHEN metric_name='process.network.transmit.rate' THEN max_value END),
-                    SUM(CASE WHEN metric_name='process.gpu.usage' THEN sum_value END) / NULLIF(SUM(CASE WHEN metric_name='process.gpu.usage' THEN sample_count END),0),
-                    MAX(CASE WHEN metric_name='process.gpu.usage' THEN max_value END)
+                    MAX(CASE WHEN metric_name='process.network.transmit.rate' THEN max_value END)
              FROM process_metric_rollups
              WHERE resolution_seconds=?6 AND bucket_start_ms>=?1 AND bucket_start_ms<?2
                AND pid=?3 AND process_start_time_seconds=?4
@@ -801,8 +770,6 @@ fn query_rollup_process_series(
                         peak_network_receive_bytes_per_second: row.get(10)?,
                         average_network_transmit_bytes_per_second: row.get(11)?,
                         peak_network_transmit_bytes_per_second: row.get(12)?,
-                        average_gpu_usage_percent: row.get(13)?,
-                        peak_gpu_usage_percent: row.get(14)?,
                     })
                 },
             )?
@@ -817,7 +784,6 @@ fn query_rollup_process_series(
             disk_write_rank: ranks[3],
             network_receive_rank: ranks[4],
             network_transmit_rank: ranks[5],
-            gpu_rank: ranks[6],
             points,
         });
     }
@@ -834,7 +800,6 @@ fn process_dimension_index(dimension: ProcessDimension) -> usize {
         ProcessDimension::DiskWrite => 3,
         ProcessDimension::NetworkReceive => 4,
         ProcessDimension::NetworkTransmit => 5,
-        ProcessDimension::Gpu => 6,
     }
 }
 
@@ -844,7 +809,6 @@ fn rollup_dimension_available(process: &ReportProcessSummary, dimension: Process
         ProcessDimension::NetworkTransmit => {
             process.peak_network_transmit_bytes_per_second.is_some()
         }
-        ProcessDimension::Gpu => process.peak_gpu_usage_percent.is_some(),
         _ => true,
     }
 }
@@ -861,7 +825,6 @@ fn rollup_dimension_value(process: &ReportProcessSummary, dimension: ProcessDime
         ProcessDimension::NetworkTransmit => process
             .peak_network_transmit_bytes_per_second
             .unwrap_or(0.0),
-        ProcessDimension::Gpu => process.peak_gpu_usage_percent.unwrap_or(0.0),
     }
 }
 

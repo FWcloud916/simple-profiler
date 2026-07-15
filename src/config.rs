@@ -14,35 +14,6 @@ pub struct AppConfig {
     pub logging: LoggingConfig,
     pub anomaly: AnomalyConfig,
     pub process: ProcessConfig,
-    pub gpu: GpuConfig,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GpuProvider {
-    #[default]
-    Auto,
-    AppleIoreg,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct GpuConfig {
-    pub enabled: bool,
-    pub interval_seconds: u64,
-    pub command_timeout_seconds: u64,
-    pub provider: GpuProvider,
-}
-
-impl Default for GpuConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            interval_seconds: 15,
-            command_timeout_seconds: 2,
-            provider: GpuProvider::Auto,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,7 +41,6 @@ pub struct ProcessConfig {
     pub top_memory: usize,
     pub top_disk: usize,
     pub top_network: usize,
-    pub top_gpu: usize,
     pub max_snapshot_processes: usize,
     pub raw_retention_hours: u64,
     pub minute_retention_days: u64,
@@ -81,9 +51,6 @@ pub struct ProcessConfig {
     pub network_enabled: bool,
     pub network_command: PathBuf,
     pub network_command_timeout_seconds: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub gpu_snapshot_path: Option<PathBuf>,
-    pub gpu_snapshot_max_age_seconds: u64,
 }
 
 impl Default for ProcessConfig {
@@ -95,7 +62,6 @@ impl Default for ProcessConfig {
             top_memory: 10,
             top_disk: 10,
             top_network: 10,
-            top_gpu: 10,
             max_snapshot_processes: 40,
             raw_retention_hours: 24,
             minute_retention_days: 7,
@@ -106,8 +72,6 @@ impl Default for ProcessConfig {
             network_enabled: cfg!(target_os = "macos"),
             network_command: PathBuf::from("/usr/bin/nettop"),
             network_command_timeout_seconds: 5,
-            gpu_snapshot_path: None,
-            gpu_snapshot_max_age_seconds: 45,
         }
     }
 }
@@ -269,7 +233,6 @@ impl Default for AppConfig {
             logging: LoggingConfig::default(),
             anomaly: AnomalyConfig::default(),
             process: ProcessConfig::default(),
-            gpu: GpuConfig::default(),
         }
     }
 }
@@ -298,7 +261,6 @@ impl AppConfig {
             bail!("logging.max_bytes and logging.retained_files must be greater than zero");
         }
         self.validate_process()?;
-        self.validate_gpu()?;
         self.validate_anomaly()?;
         if self.retention.raw_hours == 0
             || self.retention.minute_days == 0
@@ -320,16 +282,6 @@ impl AppConfig {
         Ok(())
     }
 
-    fn validate_gpu(&self) -> Result<()> {
-        if self.gpu.interval_seconds == 0 || self.gpu.command_timeout_seconds == 0 {
-            bail!("gpu interval and command timeout must be greater than zero");
-        }
-        if self.gpu.command_timeout_seconds > 30 {
-            bail!("gpu.command_timeout_seconds must not exceed 30");
-        }
-        Ok(())
-    }
-
     fn validate_process(&self) -> Result<()> {
         let process = &self.process;
         if process.interval_seconds == 0
@@ -337,7 +289,6 @@ impl AppConfig {
             || process.top_memory == 0
             || process.top_disk == 0
             || process.top_network == 0
-            || process.top_gpu == 0
             || process.max_snapshot_processes == 0
             || process.raw_retention_hours == 0
             || process.minute_retention_days == 0
@@ -345,7 +296,6 @@ impl AppConfig {
             || process.event_top_n == 0
             || process.event_evidence_max_rows == 0
             || process.network_command_timeout_seconds == 0
-            || process.gpu_snapshot_max_age_seconds == 0
         {
             bail!("process intervals, limits, and retention must be greater than zero");
         }
@@ -354,7 +304,6 @@ impl AppConfig {
             process.top_memory,
             process.top_disk,
             process.top_network,
-            process.top_gpu,
             process.max_snapshot_processes,
         ]
         .into_iter()
@@ -446,19 +395,6 @@ mod tests {
             process: ProcessConfig {
                 top_cpu: 101,
                 ..ProcessConfig::default()
-            },
-            ..AppConfig::default()
-        };
-
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn rejects_an_unbounded_gpu_command_timeout() {
-        let config = AppConfig {
-            gpu: GpuConfig {
-                command_timeout_seconds: 31,
-                ..GpuConfig::default()
             },
             ..AppConfig::default()
         };

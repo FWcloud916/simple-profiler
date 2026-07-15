@@ -346,7 +346,6 @@ mod tests {
         assert!(APP_CSS.contains(".process-line.process-rank-3"));
         assert!(APP_JS.contains("process.disk.read.rate") || APP_JS.contains("disk_read_rank"));
         assert!(APP_JS.contains("network_receive_rank"));
-        assert!(APP_JS.contains("gpu_rank"));
         assert!(APP_JS.contains("renderAttributionLane"));
     }
 }

@@ -98,7 +98,7 @@ states, and explicit data-unavailable states. Hover, focus, selected, warning, a
 MUST be visible in both themes. The time navigator uses a retained-coverage track with a visible
 selected-window marker, Earlier/Later/Live controls, and direct chart dragging; focused charts MUST
 also support Left/Right/Home/End navigation. Chart inspection uses a vertical guide, point markers,
-and a compact timestamp/value tooltip. CPU, memory, disk-I/O, network, and GPU charts MAY overlay
+and a compact timestamp/value tooltip. CPU, memory, disk-I/O, and network charts MAY overlay
 at most three bounded matching process series per dimension with a visible ranked legend. When a
 system and process measure use different units, such as disk-space percent and writer B/s, the
 process series MUST use a labeled attribution lane with its own scale.

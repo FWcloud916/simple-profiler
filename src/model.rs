@@ -68,15 +68,12 @@ pub struct ProcessSample {
     pub network_transmit_bytes: Option<u64>,
     pub network_receive_bytes_per_second: Option<f64>,
     pub network_transmit_bytes_per_second: Option<f64>,
-    pub gpu_time_ns: Option<u64>,
-    pub gpu_usage_percent: Option<f64>,
     pub cpu_rank: Option<u32>,
     pub memory_rank: Option<u32>,
     pub disk_read_rank: Option<u32>,
     pub disk_write_rank: Option<u32>,
     pub network_receive_rank: Option<u32>,
     pub network_transmit_rank: Option<u32>,
-    pub gpu_rank: Option<u32>,
 }
 
 pub type ProcessSnapshot = Vec<ProcessSample>;

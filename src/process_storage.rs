@@ -17,7 +17,6 @@ pub enum ProcessSort {
     DiskWrite,
     NetworkReceive,
     NetworkTransmit,
-    Gpu,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -38,15 +37,12 @@ pub struct StoredProcessSample {
     pub network_transmit_bytes: Option<u64>,
     pub network_receive_bytes_per_second: Option<f64>,
     pub network_transmit_bytes_per_second: Option<f64>,
-    pub gpu_time_ns: Option<u64>,
-    pub gpu_usage_percent: Option<f64>,
     pub cpu_rank: Option<u32>,
     pub memory_rank: Option<u32>,
     pub disk_read_rank: Option<u32>,
     pub disk_write_rank: Option<u32>,
     pub network_receive_rank: Option<u32>,
     pub network_transmit_rank: Option<u32>,
-    pub gpu_rank: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -63,7 +59,6 @@ enum AttributionDimension {
     DiskWrite,
     NetworkReceive,
     NetworkTransmit,
-    Gpu,
 }
 
 pub(crate) fn insert_samples(
@@ -76,11 +71,11 @@ pub(crate) fn insert_samples(
           executable_path, cpu_usage_percent, memory_bytes,
           disk_read_bytes, disk_write_bytes, disk_read_bytes_per_second, disk_write_bytes_per_second,
           network_receive_bytes, network_transmit_bytes, network_receive_bytes_per_second,
-          network_transmit_bytes_per_second, gpu_time_ns, gpu_usage_percent,
+          network_transmit_bytes_per_second,
           cpu_rank, memory_rank, disk_read_rank, disk_write_rank, network_receive_rank,
-          network_transmit_rank, gpu_rank)
+          network_transmit_rank)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
     )?;
     for sample in samples {
         statement.execute(params![
@@ -100,15 +95,12 @@ pub(crate) fn insert_samples(
             sample.network_transmit_bytes.map(u64_to_integer),
             sample.network_receive_bytes_per_second,
             sample.network_transmit_bytes_per_second,
-            sample.gpu_time_ns.map(u64_to_integer),
-            sample.gpu_usage_percent,
             sample.cpu_rank.map(i64::from),
             sample.memory_rank.map(i64::from),
             sample.disk_read_rank.map(i64::from),
             sample.disk_write_rank.map(i64::from),
             sample.network_receive_rank.map(i64::from),
             sample.network_transmit_rank.map(i64::from),
-            sample.gpu_rank.map(i64::from),
         ])?;
     }
     Ok(())
@@ -155,16 +147,16 @@ pub(crate) fn capture_open_event(
           name, executable_path, cpu_usage_percent, memory_bytes,
           disk_read_bytes, disk_write_bytes, disk_read_bytes_per_second, disk_write_bytes_per_second,
           network_receive_bytes, network_transmit_bytes, network_receive_bytes_per_second,
-          network_transmit_bytes_per_second, gpu_time_ns, gpu_usage_percent,
+          network_transmit_bytes_per_second,
           cpu_rank, memory_rank, disk_read_rank, disk_write_rank, network_receive_rank,
-          network_transmit_rank, gpu_rank)
+          network_transmit_rank)
          SELECT ?1, 'prelude', collected_at_ms, pid, process_start_time_seconds, parent_pid,
                 name, executable_path, cpu_usage_percent, memory_bytes,
                 disk_read_bytes, disk_write_bytes, disk_read_bytes_per_second, disk_write_bytes_per_second,
                 network_receive_bytes, network_transmit_bytes, network_receive_bytes_per_second,
-                network_transmit_bytes_per_second, gpu_time_ns, gpu_usage_percent,
+                network_transmit_bytes_per_second,
                 cpu_rank, memory_rank, disk_read_rank, disk_write_rank, network_receive_rank,
-                network_transmit_rank, gpu_rank
+                network_transmit_rank
          FROM process_samples
          WHERE collected_at_ms >= ?2 AND collected_at_ms < ?3
            AND {rank_column} IS NOT NULL AND {rank_column} <= ?4
@@ -231,16 +223,16 @@ fn insert_snapshot_evidence(
           name, executable_path, cpu_usage_percent, memory_bytes,
           disk_read_bytes, disk_write_bytes, disk_read_bytes_per_second, disk_write_bytes_per_second,
           network_receive_bytes, network_transmit_bytes, network_receive_bytes_per_second,
-          network_transmit_bytes_per_second, gpu_time_ns, gpu_usage_percent,
+          network_transmit_bytes_per_second,
           cpu_rank, memory_rank, disk_read_rank, disk_write_rank, network_receive_rank,
-          network_transmit_rank, gpu_rank)
+          network_transmit_rank)
          SELECT ?1, ?2, collected_at_ms, pid, process_start_time_seconds, parent_pid,
                 name, executable_path, cpu_usage_percent, memory_bytes,
                 disk_read_bytes, disk_write_bytes, disk_read_bytes_per_second, disk_write_bytes_per_second,
                 network_receive_bytes, network_transmit_bytes, network_receive_bytes_per_second,
-                network_transmit_bytes_per_second, gpu_time_ns, gpu_usage_percent,
+                network_transmit_bytes_per_second,
                 cpu_rank, memory_rank, disk_read_rank, disk_write_rank, network_receive_rank,
-                network_transmit_rank, gpu_rank
+                network_transmit_rank
          FROM process_samples
          WHERE collected_at_ms = ?3 AND {rank_column} IS NOT NULL AND {rank_column} <= ?4
          ORDER BY {rank_order}, pid LIMIT ?5"
@@ -289,9 +281,6 @@ fn attribution_dimension(metric_name: &str) -> Option<AttributionDimension> {
         "disk.io.write.rate" => Some(AttributionDimension::DiskWrite),
         "network.receive.rate" => Some(AttributionDimension::NetworkReceive),
         "network.transmit.rate" => Some(AttributionDimension::NetworkTransmit),
-        "gpu.device.usage" | "gpu.renderer.usage" | "gpu.tiler.usage" => {
-            Some(AttributionDimension::Gpu)
-        }
         _ => None,
     }
 }
@@ -311,7 +300,6 @@ fn dimension_sql(dimension: AttributionDimension) -> (&'static str, &'static str
         AttributionDimension::DiskWrite => ("disk_write_rank", "disk_write_rank"),
         AttributionDimension::NetworkReceive => ("network_receive_rank", "network_receive_rank"),
         AttributionDimension::NetworkTransmit => ("network_transmit_rank", "network_transmit_rank"),
-        AttributionDimension::Gpu => ("gpu_rank", "gpu_rank"),
     }
 }
 
@@ -456,12 +444,11 @@ const PROCESS_METRICS: &[(&str, &str, &str)] = &[
         "network_transmit_bytes_per_second",
         "network_transmit_rank",
     ),
-    ("process.gpu.usage", "gpu_usage_percent", "gpu_rank"),
 ];
 
 fn process_metric_unit(name: &str) -> &'static str {
     match name {
-        "process.cpu.usage" | "process.gpu.usage" => "percent",
+        "process.cpu.usage" => "percent",
         "process.memory.bytes" => "bytes",
         _ => "bytes_per_second",
     }
@@ -603,16 +590,15 @@ pub(crate) fn latest_top(
         ProcessSort::DiskWrite => AttributionDimension::DiskWrite,
         ProcessSort::NetworkReceive => AttributionDimension::NetworkReceive,
         ProcessSort::NetworkTransmit => AttributionDimension::NetworkTransmit,
-        ProcessSort::Gpu => AttributionDimension::Gpu,
     });
     let sql = format!(
         "SELECT collected_at_ms, pid, process_start_time_seconds, parent_pid, name,
                 executable_path, cpu_usage_percent, memory_bytes,
                 disk_read_bytes, disk_write_bytes, disk_read_bytes_per_second, disk_write_bytes_per_second,
                 network_receive_bytes, network_transmit_bytes, network_receive_bytes_per_second,
-                network_transmit_bytes_per_second, gpu_time_ns, gpu_usage_percent,
+                network_transmit_bytes_per_second,
                 cpu_rank, memory_rank, disk_read_rank, disk_write_rank, network_receive_rank,
-                network_transmit_rank, gpu_rank
+                network_transmit_rank
          FROM process_samples
          WHERE collected_at_ms = ?1 AND {rank_column} IS NOT NULL
          ORDER BY {rank_order}, pid LIMIT ?2"
@@ -631,9 +617,9 @@ pub(crate) fn event_evidence(
                 executable_path, cpu_usage_percent, memory_bytes,
                 disk_read_bytes, disk_write_bytes, disk_read_bytes_per_second, disk_write_bytes_per_second,
                 network_receive_bytes, network_transmit_bytes, network_receive_bytes_per_second,
-                network_transmit_bytes_per_second, gpu_time_ns, gpu_usage_percent,
+                network_transmit_bytes_per_second,
                 cpu_rank, memory_rank, disk_read_rank, disk_write_rank, network_receive_rank,
-                network_transmit_rank, gpu_rank
+                network_transmit_rank
          FROM anomaly_event_process_evidence
          WHERE event_id = ?1
          ORDER BY collected_at_ms, kind, COALESCE(cpu_rank, memory_rank), pid",
@@ -658,15 +644,12 @@ pub(crate) fn event_evidence(
                 network_transmit_bytes: row.get::<_, Option<i64>>(14)?.map(integer_to_u64),
                 network_receive_bytes_per_second: row.get(15)?,
                 network_transmit_bytes_per_second: row.get(16)?,
-                gpu_time_ns: row.get::<_, Option<i64>>(17)?.map(integer_to_u64),
-                gpu_usage_percent: row.get(18)?,
-                cpu_rank: row.get::<_, Option<i64>>(19)?.map(integer_to_u32),
-                memory_rank: row.get::<_, Option<i64>>(20)?.map(integer_to_u32),
-                disk_read_rank: row.get::<_, Option<i64>>(21)?.map(integer_to_u32),
-                disk_write_rank: row.get::<_, Option<i64>>(22)?.map(integer_to_u32),
-                network_receive_rank: row.get::<_, Option<i64>>(23)?.map(integer_to_u32),
-                network_transmit_rank: row.get::<_, Option<i64>>(24)?.map(integer_to_u32),
-                gpu_rank: row.get::<_, Option<i64>>(25)?.map(integer_to_u32),
+                cpu_rank: row.get::<_, Option<i64>>(17)?.map(integer_to_u32),
+                memory_rank: row.get::<_, Option<i64>>(18)?.map(integer_to_u32),
+                disk_read_rank: row.get::<_, Option<i64>>(19)?.map(integer_to_u32),
+                disk_write_rank: row.get::<_, Option<i64>>(20)?.map(integer_to_u32),
+                network_receive_rank: row.get::<_, Option<i64>>(21)?.map(integer_to_u32),
+                network_transmit_rank: row.get::<_, Option<i64>>(22)?.map(integer_to_u32),
             },
         })
     })?;
@@ -691,15 +674,12 @@ fn read_sample(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredProcessSample>
         network_transmit_bytes: row.get::<_, Option<i64>>(13)?.map(integer_to_u64),
         network_receive_bytes_per_second: row.get(14)?,
         network_transmit_bytes_per_second: row.get(15)?,
-        gpu_time_ns: row.get::<_, Option<i64>>(16)?.map(integer_to_u64),
-        gpu_usage_percent: row.get(17)?,
-        cpu_rank: row.get::<_, Option<i64>>(18)?.map(integer_to_u32),
-        memory_rank: row.get::<_, Option<i64>>(19)?.map(integer_to_u32),
-        disk_read_rank: row.get::<_, Option<i64>>(20)?.map(integer_to_u32),
-        disk_write_rank: row.get::<_, Option<i64>>(21)?.map(integer_to_u32),
-        network_receive_rank: row.get::<_, Option<i64>>(22)?.map(integer_to_u32),
-        network_transmit_rank: row.get::<_, Option<i64>>(23)?.map(integer_to_u32),
-        gpu_rank: row.get::<_, Option<i64>>(24)?.map(integer_to_u32),
+        cpu_rank: row.get::<_, Option<i64>>(16)?.map(integer_to_u32),
+        memory_rank: row.get::<_, Option<i64>>(17)?.map(integer_to_u32),
+        disk_read_rank: row.get::<_, Option<i64>>(18)?.map(integer_to_u32),
+        disk_write_rank: row.get::<_, Option<i64>>(19)?.map(integer_to_u32),
+        network_receive_rank: row.get::<_, Option<i64>>(20)?.map(integer_to_u32),
+        network_transmit_rank: row.get::<_, Option<i64>>(21)?.map(integer_to_u32),
     })
 }
 
@@ -741,10 +721,7 @@ mod tests {
             attribution_dimension("network.transmit.rate"),
             Some(AttributionDimension::NetworkTransmit)
         ));
-        assert!(matches!(
-            attribution_dimension("gpu.device.usage"),
-            Some(AttributionDimension::Gpu)
-        ));
+        assert!(attribution_dimension("gpu.device.usage").is_none());
         assert!(attribution_dimension("disk.space.used.percent").is_none());
     }
 

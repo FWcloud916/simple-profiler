@@ -116,13 +116,12 @@
               <option value="diskWrite">Peak disk write</option>
               <option value="networkReceive">Peak network receive</option>
               <option value="networkTransmit">Peak network transmit</option>
-              <option value="gpu">Peak GPU</option>
             </select>
           </label>
         </div>
         <div class="table-shell">
           <table>
-            <thead><tr><th>Process</th><th>PID</th><th>Peak CPU</th><th>Peak memory</th><th>Peak disk R/W</th><th>Peak network ↓/↑</th><th>Peak GPU</th><th>Samples</th><th>Last seen</th></tr></thead>
+            <thead><tr><th>Process</th><th>PID</th><th>Peak CPU</th><th>Peak memory</th><th>Peak disk R/W</th><th>Peak network ↓/↑</th><th>Samples</th><th>Last seen</th></tr></thead>
             <tbody id="processRows"></tbody>
           </table>
           <p id="processEmpty" class="empty-state" hidden>No retained process snapshots overlap this range.</p>
