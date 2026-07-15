@@ -17,6 +17,8 @@ use crate::{
     config::{AnomalyConfig, ProcessConfig, RetentionConfig},
     model::{CollectionBatch, MetricBatch},
     process_storage,
+    report::{ReportData, ReportRange},
+    report_storage,
 };
 
 pub use crate::anomaly_storage::{EventDetail, EventEvidence, EventSummary};
@@ -375,6 +377,10 @@ impl Storage {
         limit: usize,
     ) -> Result<Vec<StoredProcessSample>> {
         process_storage::latest_top(&self.connection, sort, limit)
+    }
+
+    pub fn report(&self, range: ReportRange) -> Result<ReportData> {
+        report_storage::load_report(&self.connection, range)
     }
 
     pub fn status(&self) -> Result<StorageStatus> {
@@ -1206,6 +1212,82 @@ mod tests {
                 .name,
             "memory-heavy"
         );
+    }
+
+    #[test]
+    fn report_uses_bounded_raw_series_and_escapes_resource_names() {
+        let directory = tempdir().expect("temp dir");
+        let path = directory.path().join("metrics.sqlite3");
+        let mut storage = Storage::open(&path).expect("open storage");
+        let anomaly = AnomalyConfig::default();
+        let process = ProcessConfig::default();
+        let mut engine = storage.load_anomaly_engine(&anomaly).expect("engine");
+        storage
+            .insert_batch_with_anomalies(
+                &CollectionBatch {
+                    metrics: vec![
+                        cpu_metric(10, 42.0),
+                        Metric::for_resource(
+                            at(10_000),
+                            "disk",
+                            "<script>alert(1)</script>",
+                            "disk.space.usage",
+                            75.0,
+                            "percent",
+                        ),
+                    ],
+                    processes: vec![process_sample(
+                        10,
+                        99,
+                        "<script>process</script>",
+                        25.0,
+                        1_024,
+                        Some(1),
+                        Some(1),
+                    )],
+                },
+                &mut engine,
+                &anomaly,
+                &process,
+            )
+            .expect("report data");
+
+        let report = storage
+            .report(ReportRange::new(0, 60_000).expect("range"))
+            .expect("report");
+        let html = crate::report::render_html(&report);
+
+        assert_eq!(report.resolution, crate::report::ReportResolution::Raw);
+        assert_eq!(report.series.len(), 2);
+        assert_eq!(report.processes.len(), 1);
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(!html.contains("<script>alert(1)</script>"));
+        assert!(
+            report
+                .series
+                .iter()
+                .all(|series| series.points.len() <= 1_200)
+        );
+    }
+
+    #[test]
+    fn report_prefers_minute_rollups_for_a_multi_hour_range() {
+        let directory = tempdir().expect("temp dir");
+        let path = directory.path().join("metrics.sqlite3");
+        let mut storage = Storage::open(&path).expect("open storage");
+        storage
+            .insert_batch(&vec![cpu_metric(10, 20.0), cpu_metric(70, 40.0)])
+            .expect("raw metrics");
+        storage
+            .run_maintenance(&test_retention(), at(3 * 60 * 60 * 1_000))
+            .expect("rollups");
+
+        let report = storage
+            .report(ReportRange::new(0, 3 * 60 * 60 * 1_000).expect("range"))
+            .expect("report");
+
+        assert_eq!(report.resolution, crate::report::ReportResolution::Minute);
+        assert!(!report.series.is_empty());
     }
 
     #[test]

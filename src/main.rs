@@ -1,9 +1,15 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
+use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
 use simple_profiler::{
-    AppConfig, logging, run_profiler,
+    AppConfig, logging,
+    report::{
+        ReportRange, default_output_path, open_report, parse_relative_duration,
+        parse_rfc3339_millis, render_html, write_html_atomically,
+    },
+    run_profiler,
     service::{ServiceManager, ServiceStatus},
     storage::{ProcessSort, Storage},
 };
@@ -59,6 +65,12 @@ enum Command {
         action: ProcessesCommand,
     },
 
+    /// Generate a self-contained local diagnostic report.
+    Report {
+        #[command(subcommand)]
+        action: ReportCommand,
+    },
+
     /// Install and manage the macOS background service.
     Service {
         #[command(subcommand)]
@@ -100,6 +112,31 @@ enum ProcessesCommand {
         /// Maximum number of processes to show.
         #[arg(long, default_value_t = 10)]
         limit: usize,
+        /// Override the SQLite database path.
+        #[arg(long)]
+        database: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ReportCommand {
+    /// Generate one HTML report for a relative or explicit time range.
+    Generate {
+        /// Relative range such as 15m, 1h, 24h, or 7d; defaults to 1h.
+        #[arg(long)]
+        last: Option<String>,
+        /// RFC 3339 start time; must be used with --to.
+        #[arg(long)]
+        from: Option<String>,
+        /// RFC 3339 end time; must be used with --from.
+        #[arg(long)]
+        to: Option<String>,
+        /// Output HTML path; defaults to ~/Documents/SimpleProfiler Reports/.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Open the generated report in the default macOS application.
+        #[arg(long)]
+        open: bool,
         /// Override the SQLite database path.
         #[arg(long)]
         database: Option<PathBuf>,
@@ -195,7 +232,57 @@ async fn main() -> Result<()> {
         }
         Command::Events { action } => handle_events(action, &mut config),
         Command::Processes { action } => handle_processes(action, &mut config),
+        Command::Report { action } => handle_report(action, &mut config),
         Command::Service { action } => handle_service(action),
+    }
+}
+
+fn handle_report(action: ReportCommand, config: &mut AppConfig) -> Result<()> {
+    match action {
+        ReportCommand::Generate {
+            last,
+            from,
+            to,
+            output,
+            open,
+            database,
+        } => {
+            if let Some(database) = database {
+                config.database_path = database;
+            }
+            if last.is_some() && (from.is_some() || to.is_some()) {
+                anyhow::bail!("--last cannot be combined with --from or --to");
+            }
+            let now = Utc::now();
+            let range = match (from, to) {
+                (Some(from), Some(to)) => {
+                    ReportRange::new(parse_rfc3339_millis(&from)?, parse_rfc3339_millis(&to)?)?
+                }
+                (None, None) => {
+                    let duration = parse_relative_duration(last.as_deref().unwrap_or("1h"))?;
+                    let duration_ms = i64::try_from(duration.as_millis()).unwrap_or(i64::MAX);
+                    ReportRange::new(
+                        now.timestamp_millis().saturating_sub(duration_ms),
+                        now.timestamp_millis(),
+                    )?
+                }
+                _ => anyhow::bail!("--from and --to must be provided together"),
+            };
+            let output = output.map_or_else(|| default_output_path(now), Ok)?;
+            let storage = Storage::open(&config.database_path)?;
+            let data = storage.report(range)?;
+            let html = render_html(&data);
+            write_html_atomically(&output, &html)?;
+            println!("report: {}", output.display());
+            println!("resolution: {}", data.resolution.label());
+            println!("metric series: {}", data.series.len());
+            println!("anomaly events: {}", data.events.len());
+            println!("processes: {}", data.processes.len());
+            if open {
+                open_report(&output)?;
+            }
+            Ok(())
+        }
     }
 }
 
