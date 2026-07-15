@@ -1,11 +1,11 @@
 # Simple Profiler — Progress
 
-> **Last session:** 2026-07-15 · commit `7d92f20` · tests: passing (65)
+> **Last session:** 2026-07-15 · commit `94e3ad1` · tests: passing (65)
 
 ## Now (WIP = 1)
 
-No feature is active. Capability-aware Apple GPU collection is implemented and verified on the
-local Apple M4; upgrading the installed LaunchAgent still requires explicit user approval.
+No feature is active. The installed LaunchAgent now runs the schema-v5 Apple GPU release, and
+background GPU metrics plus capability state are advancing on the local Apple M4.
 
 ## Feature list
 
@@ -109,6 +109,10 @@ local Apple M4; upgrading the installed LaunchAgent still requires explicit user
 - Status, service status, reports, and the dashboard now expose GPU metrics/capabilities. The GPU
   phase passes 65 tests, rustfmt, strict Clippy, release build, schema-v4-to-v5 migration, M4 live
   collection, report rendering, and loopback dashboard API smoke checks.
+- After explicit user approval, the installed LaunchAgent was upgraded to schema v5 and restarted
+  as PID 77600. Live status confirmed five Apple GPU metrics share fresh timestamps, capability
+  state is available for supported fields, ordinary/process samples continue advancing, and the
+  service stderr log has no new errors.
 
 ## Blockers
 
@@ -116,11 +120,9 @@ None.
 
 ## Next steps
 
-1. After explicit approval, upgrade the installed LaunchAgent to the schema-v5 GPU release and
-   verify background GPU samples advance.
-2. Design NVIDIA and AMD adapters without weakening field-level capability semantics.
-3. Decide whether GPU anomaly rules are useful after observing real retained workloads.
-4. Inspect the first naturally occurring CPU or memory anomaly to validate its preserved process
+1. Design NVIDIA and AMD adapters without weakening field-level capability semantics.
+2. Decide whether GPU anomaly rules are useful after observing real retained workloads.
+3. Inspect the first naturally occurring CPU or memory anomaly to validate its preserved process
    evidence in reports and the dashboard.
 
 ## Decision log
