@@ -141,7 +141,9 @@ It never listens beyond `127.0.0.1`, and each launch uses a new unguessable URL 
 15 minutes through 30 days; custom ranges support up to 365 days. The time navigator moves the
 selected window across retained history with a slider, Earlier/Later controls, or direct horizontal
 dragging on any chart. Focused charts also accept Left/Right/Home/End keys, and Live returns to the
-latest preset with auto-refresh enabled.
+latest preset with auto-refresh enabled. Hovering a chart shows the selected timestamp plus the
+system average, minimum, and maximum. CPU and memory charts also overlay the top three retained
+process series with ranked colors and line patterns; memory tooltips show both percentage and bytes.
 
 ### Run in the background on macOS
 

@@ -310,15 +310,21 @@ state, or the running background collector.
    read-only flags inside `spawn_blocking`, performs a bounded query, and closes that connection.
 4. `/api/v1/snapshot` uses the report range resolver, resolution fallback, fixed metric whitelist,
    approximately 1,200 points per series, 200 event-summary limit, and top-20 CPU/memory process
-   union. `/api/v1/events/<ID>` loads preserved evidence only for the selected event.
+   union. It also returns the union of the top three CPU and top three memory process identities,
+   each downsampled to at most approximately 360 raw-process buckets, plus a retained system-memory
+   total for percentage conversion. `/api/v1/events/<ID>` loads preserved evidence only for the
+   selected event.
 5. The embedded browser client renders light/dark resource charts with min/max bands and explicit
    gaps, a GPU summary, capability health, anomaly drill-down, storage health, and sortable process
    summaries. A retained-history slider, Earlier/Later/Live controls, chart pointer dragging, and
    chart keyboard navigation convert the selected window into existing bounded `from`/`to`
-   requests. Historical navigation disables auto-refresh until Live is selected.
+   requests. Pointer hover or chart focus shows the nearest timestamp and system average/min/max;
+   CPU and memory charts add ranked process lines with color, pattern, label, and tooltip values.
+   Memory process values display both percentage of retained system total and bytes. Historical
+   navigation disables auto-refresh until Live is selected.
 6. Slider input is debounced before querying, concurrent refresh requests collapse to the newest
-   queued range, and all navigation remains subject to the same 365-day, point, event, process, and
-   four-query admission limits.
+   queued range, and all navigation plus process chart series remain subject to the same 365-day,
+   point, event, process, and four-query admission limits.
 7. Ctrl-C or SIGTERM gracefully stops only the dashboard listener. The separately installed
    background collector and its single writer continue uninterrupted.
 

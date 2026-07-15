@@ -1,11 +1,12 @@
 # Simple Profiler — Progress
 
-> **Last session:** 2026-07-15 · commit `63f42d6` · tests: passing (66)
+> **Last session:** 2026-07-15 · commit `186700f` · tests: passing (69)
 
 ## Now (WIP = 1)
 
-No feature is active. The installed LaunchAgent and managed dashboard launcher now run the
-retained-history timeline release, and background collection remains healthy after the upgrade.
+No feature is active. Chart value inspection and ranked top-process trend lines are implemented;
+upgrading the installed binary to expose them through the managed launcher requires explicit user
+approval.
 
 ## Feature list
 
@@ -124,6 +125,13 @@ retained-history timeline release, and background collection remains healthy aft
   restarted as PID 38158. The managed dashboard exposed the slider, Earlier/Later/Live controls,
   and retained-history label; system/process sample timestamps continued advancing after the
   temporary dashboard verification process stopped.
+- Dashboard chart hover/focus now shows the nearest timestamp with system average/min/max. CPU and
+  memory charts overlay the top three retained process series using dedicated colors, line patterns,
+  rank labels, and tooltips; memory values include both system percentage and bytes.
+- Process chart queries reuse schema-v5 raw snapshots, preserve PID-plus-start-time identity, select
+  the top-three union per dimension, and cap each line near 360 points. The phase passes 69 tests,
+  JavaScriptCore syntax, rustfmt, strict Clippy, release build, and live one-hour API verification;
+  five unique series returned with at most 185 points in the observed window.
 
 ## Blockers
 
@@ -131,12 +139,19 @@ None.
 
 ## Next steps
 
-1. Design NVIDIA and AMD adapters without weakening field-level capability semantics.
-2. Decide whether GPU anomaly rules are useful after observing real retained workloads.
-3. Inspect the first naturally occurring CPU or memory anomaly to validate its preserved process
+1. After explicit approval, upgrade the installed binary to the chart-inspection release and verify
+   the managed dashboard serves tooltip and process-series assets.
+2. Design NVIDIA and AMD adapters without weakening field-level capability semantics.
+3. Decide whether GPU anomaly rules are useful after observing real retained workloads.
+4. Inspect the first naturally occurring CPU or memory anomaly to validate its preserved process
    evidence in reports and the dashboard.
 
 ## Decision log
+
+- 2026-07-15 — Overlay the union of the top three CPU and top three memory process identities on
+  system charts using bounded raw-process buckets. Convert memory bytes with a retained system-total
+  sample, and distinguish ranks with color, line pattern, text label, and tooltip instead of color
+  alone; keep schema version 5 unchanged.
 
 - 2026-07-15 — Navigate dashboard history as a fixed-duration time window over retained coverage;
   support slider/buttons, direct pointer dragging, and keyboard controls while reusing bounded

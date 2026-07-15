@@ -12,6 +12,9 @@ colors:
     success: "#16855B"
     warning: "#B54708"
     error: "#C62828"
+    process-rank-1: "#D9485F"
+    process-rank-2: "#0F8A72"
+    process-rank-3: "#C26B00"
   dark:
     primary: "#79A7FF"
     primary-active: "#A6C4FF"
@@ -24,6 +27,9 @@ colors:
     success: "#5AD6A0"
     warning: "#FFB86B"
     error: "#FF7B7B"
+    process-rank-1: "#FF7F96"
+    process-rank-2: "#57D3BC"
+    process-rank-3: "#FFB45E"
 typography:
   heading-1: { fontFamily: "system-ui", fontSize: "32px", fontWeight: "720", lineHeight: "1.15", letterSpacing: "-0.025em" }
   heading-2: { fontFamily: "system-ui", fontSize: "20px", fontWeight: "680", lineHeight: "1.25", letterSpacing: "-0.015em" }
@@ -56,11 +62,13 @@ The dashboard is a compact, information-dense monitoring interface. Its visual c
 is restrained and functional so time-series evidence and abnormal periods remain the focus. Both
 light and dark modes are required, using system fonts. It uses blue for primary data, violet for
 secondary comparison, green for healthy state, amber for warning, and red for critical state.
+Three dedicated comparison colors identify ranked process lines without borrowing severity colors.
 
 ## Colors
 
 Both light and dark semantic palettes are implemented above. Primary actions, selection, normal
 state, warning, and error MUST remain distinguishable using text or symbols in addition to color.
+Ranked process lines additionally use `#1`–`#3` labels and solid/dashed/dotted patterns.
 
 ## Typography
 
@@ -89,7 +97,9 @@ markers, a keyboard-accessible event drawer, sortable process tables, loading sk
 states, and explicit data-unavailable states. Hover, focus, selected, warning, and critical states
 MUST be visible in both themes. The time navigator uses a retained-coverage track with a visible
 selected-window marker, Earlier/Later/Live controls, and direct chart dragging; focused charts MUST
-also support Left/Right/Home/End navigation.
+also support Left/Right/Home/End navigation. Chart inspection uses a vertical guide, point markers,
+and a compact timestamp/value tooltip. CPU and memory charts MAY overlay at most three bounded
+process series per dimension with a visible ranked legend.
 
 ## Responsive Behavior
 
@@ -104,7 +114,9 @@ horizontal chart gestures MUST preserve normal vertical page scrolling on touch 
 - **Do** show the selected historical window and provide a one-action return to live data.
 - **Do** separate observed evidence from inferred causes.
 - **Do** provide non-color indicators for severity and chart series.
+- **Do** report process memory as both system percentage and bytes in chart tooltips.
 - **Don't** hide peaks by showing only averages.
+- **Don't** render unbounded process histories or imply that ranked colors represent severity.
 - **Don't** issue an API request for every raw pointer movement; debounce timeline queries.
 - **Don't** present planned collectors as currently available.
 - **Don't** send telemetry or load remote visual assets without an explicit future decision.

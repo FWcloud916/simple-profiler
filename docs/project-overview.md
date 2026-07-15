@@ -254,6 +254,7 @@ and writes under `~/Documents/SimpleProfiler Reports/` unless `--output` is prov
 | Log rotation | Before a write would exceed the configured size | Rename numbered files and retain five rotated 10 MiB files plus the current file by default |
 | Dashboard refresh | Browser request; every 15 seconds by default | Open one bounded read-only connection per API request and return JSON without changing collection state |
 | Dashboard time navigation | Slider, Earlier/Later/Live control, chart pointer drag, or chart keyboard input | Convert the retained-coverage position into a bounded explicit `from`/`to` snapshot query; historical navigation disables auto-refresh until Live is selected |
+| Dashboard chart inspection | Pointer hover or chart focus | Show the nearest system bucket's average/min/max and overlay at most three bounded CPU and memory process series per dimension; memory values use the retained system-total sample for percentage conversion |
 | Graceful shutdown | Ctrl-C, SIGTERM, or `--samples` limit | Close the channel, drain queued batches, then stop |
 
 Maintenance waits 30 seconds before considering a bucket complete. Raw deletion cannot pass the
