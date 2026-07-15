@@ -13,6 +13,10 @@ A local-first Rust service that continuously records system metrics for later di
   critical, recovery, duration, sample-count, and data-gap rules.
 - Persists anomaly state across restarts and preserves bounded prelude, trigger, escalation, peak,
   periodic, and recovery evidence independently from raw-sample retention.
+- Samples the union of the top 10 CPU and top 10 resident-memory processes every 15 seconds by
+  default, without collecting command lines, environments, or working directories.
+- Attaches bounded top-process evidence to CPU and memory anomaly events; disk-space events are
+  intentionally not attributed to processes.
 - Retains raw samples for 24 hours, one-minute rollups for 30 days, and 15-minute rollups for 365
   days by default; closed anomaly events are retained for 365 days by default.
 - Reports schema version, row counts and time ranges by resolution, database/WAL size, rollup
@@ -48,6 +52,7 @@ Collect two cycles into a temporary database, then inspect it:
 cargo run -- run --database /tmp/simple-profiler.sqlite3 --interval-seconds 1 --samples 2
 cargo run -- status --database /tmp/simple-profiler.sqlite3
 cargo run -- events list --database /tmp/simple-profiler.sqlite3
+cargo run -- processes top --database /tmp/simple-profiler.sqlite3 --sort cpu
 ```
 
 Load settings from the tracked example configuration:
@@ -71,6 +76,21 @@ cargo run -- events show 1
 [`config/default.toml`](config/default.toml) contains the default sustained CPU, memory-pressure,
 and per-mount disk-space rules. Rule state is stored in SQLite, so a normal process restart does
 not reset an in-progress detection or open event.
+
+### Inspect resource-heavy processes
+
+Show the latest CPU or resident-memory ranking:
+
+```bash
+cargo run -- processes top --sort cpu --limit 10
+cargo run -- processes top --sort memory --limit 10
+```
+
+Process identity uses PID plus process start time, so PID reuse does not merge unrelated
+processes. Raw process snapshots default to 24-hour retention. CPU and memory event evidence is
+copied into the event record and remains available after those snapshots expire. Executable paths
+are disabled by default; command lines, environment variables, and working directories are never
+collected.
 
 ### Run in the background on macOS
 

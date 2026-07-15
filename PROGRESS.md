@@ -1,11 +1,11 @@
 # Simple Profiler — Progress
 
-> **Last session:** 2026-07-15 · commit `c08b2f3` · tests: passing
+> **Last session:** 2026-07-15 · commit `2292643` · tests: passing (44)
 
 ## Now (WIP = 1)
 
-No feature is active. Sustained anomaly detection and evidence retention are implemented; local
-HTML diagnostic reports are the next product feature.
+No feature is active. Top-process snapshots and CPU/memory event attribution are implemented;
+local HTML diagnostic reports are the next product feature.
 
 ## Feature list
 
@@ -15,10 +15,11 @@ HTML diagnostic reports are the next product feature.
 | 2 | Record disk capacity/I/O and network transfer measurements | `cargo test` | passing |
 | 3 | Enforce raw-data retention and create time rollups | `cargo test` | passing |
 | 4 | Detect sustained resource anomalies and preserve event evidence | `cargo test` | passing |
-| 5 | Generate a local HTML diagnostic report for a selected time range | `cargo test` | not_started |
-| 6 | Explore metrics and events in a local dashboard | `cargo test` | not_started |
-| 7 | Collect GPU measurements through capability-aware platform adapters | `cargo test` | not_started |
-| 8 | Install and supervise the profiler as an operating-system background service | `cargo test` | passing |
+| 5 | Record bounded top-process snapshots and attribute CPU/memory events | `cargo test` | passing |
+| 6 | Generate a local HTML diagnostic report for a selected time range | `cargo test` | not_started |
+| 7 | Explore metrics and events in a local dashboard | `cargo test` | not_started |
+| 8 | Collect GPU measurements through capability-aware platform adapters | `cargo test` | not_started |
+| 9 | Install and supervise the profiler as an operating-system background service | `cargo test` | passing |
 
 ## Done
 
@@ -60,6 +61,15 @@ HTML diagnostic reports are the next product feature.
   samples expire, and open/pending state resumes across process restarts.
 - The anomaly phase passes 35 tests, rustfmt, strict Clippy, v2-to-v3 migration, restart/recovery,
   evidence-retention, and command-line smoke checks.
+- A privacy-bounded process collector samples the union of top CPU and resident-memory processes
+  every 15 seconds by default, identifying PID reuse with PID plus process start time.
+- SQLite schema v4 stores 24 hours of raw process snapshots and copies bounded top-process evidence
+  into CPU/memory anomaly events; disk-space events intentionally receive no process attribution.
+- `processes top --sort cpu|memory`, `events show`, `status`, and `service status` expose process
+  rankings, event attribution, and process-snapshot health without collecting command lines,
+  environments, or working directories; executable paths remain opt-in.
+- The process-attribution phase passes 44 tests, rustfmt, strict Clippy, release build, v3-to-v4
+  migration, PID-reuse/retention/cardinality/privacy boundaries, and live CPU/memory CLI smoke checks.
 
 ## Blockers
 
@@ -71,10 +81,16 @@ None.
 2. Define report queries that choose raw, one-minute, or 15-minute data by requested range.
 3. Design report sections that combine resource summaries, anomaly timelines, and evidence.
 4. With explicit approval, build a release binary, upgrade the installed LaunchAgent, and verify
-   that schema v3 migration and event collection work against the live service database.
+   that schema v4 migration and process/event collection work against the live service database.
 
 ## Decision log
 
+- 2026-07-15 — Sample the union of top 10 CPU and top 10 resident-memory processes every 15
+  seconds; keep raw snapshots for 24 hours and identify process instances with PID plus start time.
+- 2026-07-15 — Copy top five fresh process rows into CPU/memory event checkpoints with a 500-row
+  per-event cap; do not attribute disk-space events from unrelated CPU/memory dimensions.
+- 2026-07-15 — Do not collect process command lines, environments, or working directories;
+  executable path collection is opt-in and disabled by default.
 - 2026-07-15 — Evaluate anomaly rules from incoming raw batches inside the single SQLite writer;
   raw samples, event changes, evidence, and restart state commit atomically.
 - 2026-07-15 — Use `normal → pending → open → recovering → normal` with warning-to-critical

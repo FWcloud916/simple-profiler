@@ -33,6 +33,7 @@ cargo build --release
 cargo run -- run
 cargo run -- events list
 cargo run -- events show 1
+cargo run -- processes top --sort cpu
 target/release/simple-profiler service status
 cargo test
 cargo fmt --check
@@ -49,10 +50,13 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ## Conventions
 
-- Collector implementations live under `src/collector/` and return `MetricBatch` values.
+- Collector implementations live under `src/collector/` and return normalized metric or process
+  snapshots to the runtime; they do not write SQLite directly.
 - Blocking SQLite work stays in the storage writer's blocking task.
 - Anomaly rules and state transitions live in `src/anomaly.rs`; their SQLite representation and
   evidence queries live in `src/anomaly_storage.rs`.
+- Process snapshot persistence, ranking queries, retention, and anomaly attribution live in
+  `src/process_storage.rs` and remain owned by the single writer transaction.
 - Implemented and planned behavior MUST be labeled separately in documentation.
 
 ## Docs maintenance

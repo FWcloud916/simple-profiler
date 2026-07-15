@@ -27,8 +27,19 @@ measurement passed between collectors and storage.
 ### MetricBatch
 
 **Status: implemented, transient.** A `Vec<Metric>` containing all successful collector results
-from one cycle. It is the message sent through the bounded Tokio channel. The batch is a
-transaction boundary but has no database identifier or table.
+from one cycle.
+
+### ProcessSample and CollectionBatch
+
+**Status: implemented.** A process sample records one bounded ranking entry: collection time, PID,
+process start time, optional parent PID, process name, optional executable path, CPU percentage,
+resident bytes, and optional CPU/memory ranks. PID plus start time is the stable identity used to
+distinguish PID reuse. A `CollectionBatch` combines a `MetricBatch` and one process snapshot and is
+the message sent through the bounded Tokio channel. The batch is one transaction boundary but has
+no database identifier or table.
+
+Process privacy is deliberate: command lines, environment variables, and working directories are
+never collected. Executable path collection is opt-in and disabled by default.
 
 ### MetricSample
 
@@ -107,6 +118,15 @@ timestamp, value, and evidence kind: `prelude`, `trigger`, `escalation`, `peak`,
 window. Only the latest `peak` evidence row is retained, while periodic evidence is rate-limited.
 Evidence remains available after the corresponding raw samples expire.
 
+### AnomalyEventProcessEvidence
+
+**Status: implemented in SQLite as `anomaly_event_process_evidence`.** CPU events copy top CPU
+rows and memory events copy top memory rows for prelude, trigger, escalation, periodic, and recovery
+checkpoints. Peak-only metric evidence does not add a process checkpoint. Disk-space events are
+not attributed because filesystem pressure cannot be reliably assigned from process CPU or
+resident memory. The default copies at most five rows per checkpoint and 500 rows per event.
+Copied evidence remains available after the 24-hour raw process snapshot retention expires.
+
 ### Report
 
 **Status: planned — no schema yet.** Will record requested diagnostic time ranges and generated
@@ -118,10 +138,12 @@ Solid relationships are implemented; dotted descriptions are planned only.
 
 ```text
 CollectionCycle (transient) 1──* MetricSample
+CollectionCycle (transient) 1──* ProcessSample
 MetricSample *──* MetricRollup   (derived by matching series and time bucket; no foreign key)
 MaintenanceState ── stores ──► one-minute and 15-minute watermark keys
 AnomalyRuleState 0..1──0..1 Event
 Event 1──* AnomalyEventEvidence
+Event 1──* AnomalyEventProcessEvidence (CPU/memory events only)
 
 Device 1··* MetricSample     (planned — no schema yet)
 Report 1··* Event            (planned — no schema yet)
@@ -138,8 +160,10 @@ planned Device entity.
    beside the selected database; a second collector for that database is rejected.
 2. The runtime waits for the Tokio interval and creates one `CollectionContext` containing a shared
    UTC timestamp and optional elapsed time.
-3. `SystemCollector`, `DiskCollector`, and `NetworkCollector` run sequentially with that context.
-4. Collector failures are logged while successful results are combined into one batch.
+3. `SystemCollector`, `DiskCollector`, and `NetworkCollector` run each metric cycle;
+   `ProcessCollector` runs on its independent 15-second default cadence.
+4. Collector failures are logged while successful metric and process results are combined into one
+   `CollectionBatch`.
 5. A non-empty batch is sent through the bounded channel and committed with anomaly evaluation as
    one transaction.
 6. A sample limit, Ctrl-C, or SIGTERM stops collection, closes the channel, drains queued batches,
@@ -152,15 +176,19 @@ its configured interval (60 seconds by default). With idle suppression enabled, 
 read/write bytes or a network interface whose counters are all zero emits no I/O metrics; rollup
 consumers interpret those missing delta intervals as zero activity.
 
+Process CPU usage also requires a previous refresh, so the first due process refresh only warms
+the collector. Later snapshots rank all visible processes, then retain the union of the configured
+top CPU and top resident-memory entries. The default union contains at most 20 rows per snapshot.
+
 ## 4. Storage Flow
 
 1. `spawn_writer` starts one blocking task that owns a `rusqlite::Connection`.
 2. Opening storage creates parent directories, enables WAL, sets a busy timeout, and runs the
    transactional schema upgrade.
 3. Startup restores configured rule states from `anomaly_states`.
-4. For each received `MetricBatch`, the writer clones and evaluates the engine, then commits raw
-   samples, event transitions, evidence, and all next states inside one SQLite transaction. The
-   live engine advances only after commit succeeds.
+4. For each received `CollectionBatch`, the writer clones and evaluates the engine, then commits
+   raw metric/process samples, event transitions, metric/process evidence, and all next states
+   inside one SQLite transaction. The live engine advances only after commit succeeds.
 5. At the configured cadence, the same writer transaction recomputes up to the configured number
    of complete one-minute buckets, then derives complete 15-minute buckets from them.
 6. That transaction advances watermarks and deletes expired metrics and closed events in bounded
@@ -170,7 +198,8 @@ consumers interpret those missing delta intervals as zero activity.
 8. Shutdown drops the sender, drains queued batches, commits them, and joins the writer task.
 
 Schema version 2 adds `collected_at_ms`, backfills v1 timestamps, and creates `metric_rollups` and
-`maintenance_state`. Schema version 3 creates the three anomaly tables and their query indexes. A
+`maintenance_state`. Schema version 3 creates the three anomaly tables and their query indexes.
+Schema version 4 creates `process_samples` and `anomaly_event_process_evidence`. A
 database newer than the supported version is rejected rather than opened with an incompatible
 writer. Rollup buckets wait for the configured late-arrival grace period.
 One-minute aggregation reads raw rows in timestamp/ID order; 15-minute aggregation combines counts,
@@ -209,10 +238,17 @@ The tracked default rules are:
 | `disk-space-low` / `disk.space.usage` | ≥90% for 60 s and 2 samples | ≥95% for 60 s and 2 samples | ≤88% for 60 s and 2 samples | 90 s |
 
 When an event opens, storage records up to five configured minutes of prelude samples plus the
-trigger. Later evaluations update the last value, peak, sample count, and gap count; escalation,
+trigger. A fresh process snapshot must be no older than two configured process intervals before it
+can be copied as attribution evidence. Later evaluations update the last value, peak, sample count,
+and gap count; escalation,
 newest peak, periodic, and final recovery evidence are preserved. The default periodic interval is
 60 seconds. Closed events and their evidence are retained for 365 days by default and removed in
 1,000-event maintenance chunks.
+
+CPU events select `cpu_rank`; memory events select `memory_rank`. Trigger evidence is copied first,
+then the newest eligible prelude rows until the per-event cap is reached. Escalation, periodic, and
+recovery checkpoints use the latest fresh snapshot. Disk-space events intentionally receive no
+process attribution because the collected process dimensions do not identify filesystem usage.
 
 ## 6. Metric Naming
 
@@ -242,8 +278,8 @@ registry for validating names and units is TBD — not yet designed.
 
 ## 7. Failure Behavior
 
-- Invalid sampling/retention values, interval, channel capacity, or retention-tier ordering are
-  rejected before the runtime starts.
+- Invalid sampling/retention values, interval, channel capacity, retention-tier ordering, process
+  ranking limits, or event-evidence caps are rejected before the runtime starts.
 - A collector error is logged, while successful collectors in the same cycle continue to storage.
 - An all-failed cycle does not write an empty batch but still counts toward `--samples`.
 - A closed storage channel stops the run with an error.
@@ -272,8 +308,9 @@ N/A — the initial version has no deprecated domain components.
 No separate domain maintenance scripts exist. The writer performs rollup and retention maintenance
 internally. The `status` command shows raw/rollup ranges, storage sizes, watermarks, maintenance,
 and open-event counts. `events list` lists recent or open events and `events show` renders one
-event's thresholds, measurements, counts, and evidence. On macOS, the `service` command group
-implements this lifecycle:
+event's thresholds, measurements, counts, metric evidence, and related-process evidence.
+`processes top` renders the latest CPU or resident-memory ranking. On macOS, the `service` command
+group implements this lifecycle:
 
 ```text
 uninstalled ── install ──► loaded/running
