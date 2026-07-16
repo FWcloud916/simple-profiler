@@ -1,6 +1,6 @@
 # Simple Profiler — Progress
 
-> **Last session:** 2026-07-16 · commit `7ae69dc` · tests: passing (70)
+> **Last session:** 2026-07-16 · commit `f268141` · tests: passing (70)
 
 ## Now (WIP = 1)
 
@@ -181,6 +181,9 @@ running schema v7 with CPU, memory, disk, network, process, anomaly, report, and
 - Annotated tag `v0.1.0` passed version, CHANGELOG, and main-history validation, then published
   native ARM64 and Intel archives plus `SHA256SUMS` at the GitHub Release. Both downloaded release
   checksums passed, archive contents were complete, and the ARM64 binary reported version 0.1.0.
+- README screenshots now use three exact crops from the current schema-v7 light dashboard: timeline
+  and overview, multi-resource charts with process overlays, and anomaly/storage/process details.
+  The older dark-mode chart image is no longer referenced.
 
 ## Blockers
 

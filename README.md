@@ -40,6 +40,50 @@ A local-first Rust service that continuously records system metrics for later di
 GPU monitoring is intentionally not part of the project. Schema v7 removes its historical
 metrics, process fields, capabilities, reports, and dashboard surfaces during migration.
 
+## Screenshots
+
+### Timeline, overview, and process overlays
+
+<p align="center">
+  <img src="docs/images/dashboard-overview.png" width="760"
+       alt="Simple Profiler timeline, overview cards, CPU and memory charts, and disk activity">
+</p>
+
+The dashboard brings the evidence for a selected time window into one local, read-only view.
+Presets, Earlier/Later controls, the global slider, and direct chart dragging move through retained
+history; **Live** returns to the newest window. CPU and memory charts place ranked process lines
+beside the system trend so a spike can be correlated without switching views.
+
+### Disk and network attribution
+
+![Disk and network charts with ranked process overlays](docs/images/dashboard-resources.png)
+
+Disk and network charts preserve their native units and show the processes that contributed the
+most activity in the selected range. Line colors are paired with rank labels and patterns rather
+than relying on color alone. A provider can degrade independently without hiding the remaining
+system or process measurements.
+
+### Anomalies, storage health, and top processes
+
+![Anomaly summary, SQLite storage health, and resource-heavy process table](docs/images/dashboard-processes.png)
+
+The lower dashboard combines anomaly evidence, retention/storage health, and a sortable process
+table. The table compares peak CPU, memory, disk read/write, network receive/transmit, sample count,
+and last-seen time while preserving PID-plus-start-time process identity.
+
+Together, the three views support the main diagnostic flow:
+
+- Move through retained history with presets, Earlier/Later controls, the global slider, or by
+  dragging a chart; return to **Live** to resume automatic refresh.
+- Compare CPU, memory, disk capacity/I/O, and network activity without mixing unlike units. Summary
+  cards keep the current peak values and anomaly count visible while exploring history.
+- Correlate a system spike with the colored process lines on its chart, then inspect the bounded
+  resource-heavy process table for CPU, memory, disk, network, sample count, and last-seen time.
+- Review anomaly evidence and SQLite storage health without pausing the background collector.
+
+Charts also support light and dark system themes. Hover or keyboard focus selects the nearest
+timestamp and shows the system minimum, average, maximum, and matching ranked processes.
+
 ## Quickstart
 
 ### Prerequisites
